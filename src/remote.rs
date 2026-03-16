@@ -130,7 +130,7 @@ pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str
         // break this because waypipe server only wraps the first command
         // in the chain. Claude --resume works fine without tmux.
         let ssh_cmd = format!(
-            "cd {} && exec $HOME/.local/bin/claude --dangerously-skip-permissions --resume {}",
+            "bash -c 'cd {} && exec $HOME/.local/bin/claude --dangerously-skip-permissions --resume {}'",
             shell_escape(project),
             session_id,
         );
@@ -208,7 +208,7 @@ pub fn open_new_remote_session(ssh_host: &str, dir: &str, gpu: bool) -> std::pro
     if gpu {
         // With waypipe: run Claude directly so it inherits WAYLAND_DISPLAY.
         let ssh_cmd = format!(
-            "cd {} && exec $HOME/.local/bin/claude --dangerously-skip-permissions",
+            "bash -c 'cd {} && exec $HOME/.local/bin/claude --dangerously-skip-permissions'",
             shell_escape(dir),
         );
         run_ssh(ssh_host, &ssh_cmd, gpu)
