@@ -313,13 +313,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(session) = app.selected_remote_session() {
                             let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
 
-                            // Sessions with no history can't be resumed
-                            if session.msg_count == 0 {
-                                // Check if PID is still alive - if so, nothing to do
-                                // (can't take over a session with no conversation data)
-                                continue;
-                            }
-
                             if let Some(pid) = session.active_pid {
                                 // Verify PID is actually still alive before killing
                                 if remote::is_remote_pid_alive(&ssh_host, pid) {
