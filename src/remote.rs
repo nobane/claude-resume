@@ -98,7 +98,7 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) {
+pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) -> std::process::ExitStatus {
     // Must use project dir (not last_cwd) because Claude Code registers
     // sessions under the project path it was started from
     let cwd = &session.project;
@@ -113,13 +113,12 @@ pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) {
         &session.id,
     );
 
-    let _ = Command::new("foot")
-        .arg("-e")
-        .arg("ssh")
+    Command::new("ssh")
         .arg("-t")
         .arg(ssh_host)
         .arg(&ssh_cmd)
-        .spawn();
+        .status()
+        .unwrap_or_else(|_| std::process::ExitStatus::default())
 }
 
 pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>, String> {
@@ -176,19 +175,18 @@ pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>
         .collect())
 }
 
-pub fn open_new_remote_session(ssh_host: &str, dir: &str) {
+pub fn open_new_remote_session(ssh_host: &str, dir: &str) -> std::process::ExitStatus {
     let ssh_cmd = format!(
         "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
         shell_escape(dir),
     );
 
-    let _ = Command::new("foot")
-        .arg("-e")
-        .arg("ssh")
+    Command::new("ssh")
         .arg("-t")
         .arg(ssh_host)
         .arg(&ssh_cmd)
-        .spawn();
+        .status()
+        .unwrap_or_else(|_| std::process::ExitStatus::default())
 }
 
 pub fn shell_escape(s: &str) -> String {

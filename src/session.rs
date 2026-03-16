@@ -203,20 +203,28 @@ fn read_last_cwd(path: &std::path::Path) -> Option<String> {
     None
 }
 
-/// Read the cwd from a session's PID file in ~/.claude/sessions/
-fn read_session_cwd(session_id: &str) -> Option<String> {
-    let sessions_dir = dirs::home_dir()?.join(".claude/sessions");
+/// Build a map of session_id -> cwd from all PID files in ~/.claude/sessions/
+fn build_session_cwd_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let sessions_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude/sessions"),
+        None => return map,
+    };
     if let Ok(entries) = fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
-            let content = fs::read_to_string(entry.path()).ok()?;
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if val.get("sessionId").and_then(|v| v.as_str()) == Some(session_id) {
-                    return val.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let (Some(sid), Some(cwd)) = (
+                        val.get("sessionId").and_then(|v| v.as_str()),
+                        val.get("cwd").and_then(|v| v.as_str()),
+                    ) {
+                        map.insert(sid.to_string(), cwd.to_string());
+                    }
                 }
             }
         }
     }
-    None
+    map
 }
 
 pub fn load_sessions() -> Vec<Session> {
@@ -231,6 +239,7 @@ pub fn load_sessions() -> Vec<Session> {
 
     let resumable = find_resumable_sessions();
     let mut active = find_active_sessions();
+    let session_cwd_map = build_session_cwd_map();
 
     let mut msg_map: HashMap<String, Vec<(u64, String)>> = HashMap::new();
     let mut meta_map: HashMap<String, (String, Option<String>)> = HashMap::new();
@@ -304,7 +313,7 @@ pub fn load_sessions() -> Vec<Session> {
 
     // Add active sessions that had no history.jsonl entries
     for (sid, info) in active {
-        let cwd = read_session_cwd(&sid);
+        let cwd = session_cwd_map.get(&sid).cloned();
         let project = cwd.clone().unwrap_or_default();
         let display_msg = format!("(running in {})", short_project(&project));
         sessions.push(Session {

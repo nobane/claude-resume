@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{Block, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -209,33 +209,38 @@ pub fn wrap_text(text: &str, width: usize, indent: usize, style: Style) -> Vec<L
     lines
 }
 
-pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let selected_idx = app.session_state.selected();
+/// Data needed to render one session row (local or remote).
+struct SessionRow<'a> {
+    last_ts: u64,
+    cwd_display: String,
+    active_marker: String,
+    last_msg: &'a str,
+    msg_count: usize,
+    messages: &'a [String],
+}
+
+fn draw_session_list<'a>(
+    f: &mut Frame,
+    area: ratatui::layout::Rect,
+    rows: Vec<SessionRow<'a>>,
+    selected_idx: Option<usize>,
+    expand_lines: usize,
+    list_state: &mut ListState,
+) {
     let w = area.width as usize;
 
-    let items: Vec<ListItem> = app
-        .session_filtered
+    let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(list_pos, &idx)| {
-            let s = &app.sessions[idx];
+        .map(|(list_pos, s)| {
             let time_ago = format_time_ago(s.last_ts);
 
-            let cwd_display = s
-                .last_cwd
-                .as_deref()
-                .map(short_project)
-                .unwrap_or_else(|| short_project(&s.project));
-
-            // Active marker
-            let active_marker = if let Some(ref info) = s.active {
-                let ws = info.workspace.as_deref().unwrap_or("?");
-                Span::styled(format!(" ●{}", ws), Style::default().fg(Color::Green))
-            } else {
+            let active_marker = if s.active_marker.is_empty() {
                 Span::styled("  ", Style::default())
+            } else {
+                Span::styled(format!(" ●{}", s.active_marker), Style::default().fg(Color::Green))
             };
 
-            // Line 1: marker  time  dir  msg_count
             let line1 = Line::from(vec![
                 active_marker,
                 Span::styled(
@@ -244,7 +249,7 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    cwd_display.clone(),
+                    s.cwd_display.clone(),
                     Style::default().fg(Color::Rgb(100, 160, 220)),
                 ),
                 Span::styled(
@@ -253,7 +258,6 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 ),
             ]);
 
-            // Line 2: last message (full width)
             let msg_width = w.saturating_sub(5);
             let preview: String = s.last_msg.chars().take(msg_width).collect();
             let line2 = Line::from(vec![
@@ -262,13 +266,13 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ]);
 
             let is_selected = selected_idx == Some(list_pos);
-            if is_selected && app.expand_lines > 0 {
+            if is_selected && expand_lines > 0 {
                 let mut lines = vec![line1, line2];
 
                 let msg_count = s.messages.len();
                 let skip = if msg_count > 1 { 1 } else { 0 };
                 let available = msg_count.saturating_sub(skip);
-                let show = app.expand_lines.min(available);
+                let show = expand_lines.min(available);
                 let start = msg_count.saturating_sub(skip + show);
                 let end = msg_count.saturating_sub(skip);
 
@@ -300,12 +304,9 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     }
                 }
 
-                // Blank separator line
                 lines.push(Line::raw(""));
-
                 ListItem::new(lines)
             } else {
-                // Blank line between items for spacing
                 ListItem::new(vec![line1, line2, Line::raw("")])
             }
         })
@@ -316,7 +317,43 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .highlight_style(Style::default().bg(Color::Rgb(50, 50, 70)))
         .highlight_symbol("▸ ");
 
-    f.render_stateful_widget(list, area, &mut app.session_state.clone());
+    f.render_stateful_widget(list, area, list_state);
+}
+
+pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let rows: Vec<SessionRow> = app
+        .session_filtered
+        .iter()
+        .map(|&idx| {
+            let s = &app.sessions[idx];
+            let cwd_display = s
+                .last_cwd
+                .as_deref()
+                .map(short_project)
+                .unwrap_or_else(|| short_project(&s.project));
+            let active_marker = match &s.active {
+                Some(info) => info.workspace.as_deref().unwrap_or("?").to_string(),
+                None => String::new(),
+            };
+            SessionRow {
+                last_ts: s.last_ts,
+                cwd_display,
+                active_marker,
+                last_msg: &s.last_msg,
+                msg_count: s.msg_count,
+                messages: &s.messages,
+            }
+        })
+        .collect();
+
+    draw_session_list(
+        f,
+        area,
+        rows,
+        app.session_state.selected(),
+        app.expand_lines,
+        &mut app.session_state.clone(),
+    );
 }
 
 fn draw_remote_hosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -371,117 +408,58 @@ fn draw_remote_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         return;
     }
 
-    let selected_idx = app.remote_session_state.selected();
-    let w = area.width as usize;
-
-    let items: Vec<ListItem> = app
+    let rows: Vec<SessionRow> = app
         .remote_sessions
         .iter()
-        .enumerate()
-        .map(|(list_pos, s)| {
-            let time_ago = format_time_ago(s.last_ts);
-
-            let cwd_display = s.last_cwd.as_deref().unwrap_or(&s.project);
-
-            let active_marker = if let Some(pid) = s.active_pid {
-                Span::styled(format!(" ●{}", pid), Style::default().fg(Color::Green))
-            } else {
-                Span::styled("  ", Style::default())
+        .map(|s| {
+            let cwd_display = s.last_cwd.as_deref().unwrap_or(&s.project).to_string();
+            let active_marker = match s.active_pid {
+                Some(pid) => pid.to_string(),
+                None => String::new(),
             };
-
-            let line1 = Line::from(vec![
+            SessionRow {
+                last_ts: s.last_ts,
+                cwd_display,
                 active_marker,
-                Span::styled(
-                    format!(" {:>8}", time_ago),
-                    Style::default().fg(Color::Rgb(100, 100, 120)),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    cwd_display.to_string(),
-                    Style::default().fg(Color::Rgb(100, 160, 220)),
-                ),
-                Span::styled(
-                    format!("  {}m", s.msg_count),
-                    Style::default().fg(Color::Rgb(80, 80, 100)),
-                ),
-            ]);
-
-            let msg_width = w.saturating_sub(5);
-            let preview: String = s.last_msg.chars().take(msg_width).collect();
-            let line2 = Line::from(vec![
-                Span::raw("     "),
-                Span::styled(preview, Style::default().fg(Color::Rgb(180, 180, 190))),
-            ]);
-
-            let is_selected = selected_idx == Some(list_pos);
-            if is_selected && app.expand_lines > 0 {
-                let mut lines = vec![line1, line2];
-
-                let msg_count = s.messages.len();
-                let skip = if msg_count > 1 { 1 } else { 0 };
-                let available = msg_count.saturating_sub(skip);
-                let show = app.expand_lines.min(available);
-                let start = msg_count.saturating_sub(skip + show);
-                let end = msg_count.saturating_sub(skip);
-
-                for i in (start..end).rev() {
-                    let msg = &s.messages[i];
-                    let label = format!("  [{}] ", i + 1);
-                    let label_len = label.len();
-                    let msg_lines = wrap_text(
-                        msg,
-                        w.saturating_sub(2),
-                        label_len,
-                        Style::default().fg(Color::Rgb(150, 150, 165)),
-                    );
-                    if let Some(_first) = msg_lines.first() {
-                        let mut first_spans = vec![Span::styled(
-                            label.clone(),
-                            Style::default().fg(Color::Rgb(70, 70, 90)),
-                        )];
-                        let text_part: String =
-                            msg.chars().take(w.saturating_sub(label_len + 2)).collect();
-                        first_spans.push(Span::styled(
-                            text_part,
-                            Style::default().fg(Color::Rgb(150, 150, 165)),
-                        ));
-                        lines.push(Line::from(first_spans));
-                        for wrap_line in msg_lines.iter().skip(1) {
-                            lines.push(wrap_line.clone());
-                        }
-                    }
-                }
-
-                lines.push(Line::raw(""));
-                ListItem::new(lines)
-            } else {
-                ListItem::new(vec![line1, line2, Line::raw("")])
+                last_msg: &s.last_msg,
+                msg_count: s.msg_count,
+                messages: &s.messages,
             }
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().style(Style::default().bg(Color::Rgb(30, 30, 40))))
-        .highlight_style(Style::default().bg(Color::Rgb(50, 50, 70)))
-        .highlight_symbol("▸ ");
-
-    f.render_stateful_widget(list, area, &mut app.remote_session_state.clone());
+    draw_session_list(
+        f,
+        area,
+        rows,
+        app.remote_session_state.selected(),
+        app.expand_lines,
+        &mut app.remote_session_state.clone(),
+    );
 }
 
 fn draw_new_session(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if app.dir_filtered.is_empty() {
-        let msg = Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                if app.dir_query.is_empty() {
-                    "No directories found"
-                } else {
-                    "No matching directories"
-                },
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]))
-        .block(Block::default().style(Style::default().bg(Color::Rgb(30, 30, 40))));
+        let text = if let Some(ref err) = app.remote_error {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("Error: {}", err), Style::default().fg(Color::Red)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    if app.dir_query.is_empty() {
+                        "No directories found"
+                    } else {
+                        "No matching directories"
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        };
+        let msg = Paragraph::new(text)
+            .block(Block::default().style(Style::default().bg(Color::Rgb(30, 30, 40))));
         f.render_widget(msg, area);
         return;
     }

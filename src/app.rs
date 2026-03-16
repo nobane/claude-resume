@@ -264,7 +264,6 @@ impl App {
             self.dir_state.select(Some(0));
         }
         self.prev_view = Some(Box::new(std::mem::replace(&mut self.view, View::NewSession)));
-        self.view = View::NewSession;
     }
 
     pub fn enter_new_remote_session(&mut self) {
@@ -284,9 +283,9 @@ impl App {
                 }
                 self.dir_list.sort_by(|a, b| b.score.cmp(&a.score).then(a.display.cmp(&b.display)));
             }
-            Err(_e) => {
-                // Fall back to empty
+            Err(e) => {
                 self.dir_list = Vec::new();
+                self.remote_error = Some(e);
             }
         }
         self.dir_query.clear();
@@ -296,7 +295,6 @@ impl App {
             self.dir_state.select(Some(0));
         }
         self.prev_view = Some(Box::new(std::mem::replace(&mut self.view, View::NewRemoteSession)));
-        self.view = View::NewRemoteSession;
     }
 
     pub fn apply_dir_filter(&mut self) {

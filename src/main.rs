@@ -145,13 +145,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if app.view == View::NewRemoteSession {
                                 let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
-                                remote::open_new_remote_session(&ssh_host, &dir.path);
                                 restore_terminal();
-                                std::process::exit(0);
+                                let status = remote::open_new_remote_session(&ssh_host, &dir.path);
+                                std::process::exit(status.code().unwrap_or(0));
                             } else {
                                 // Local: replace TUI process with claude
-                                disable_raw_mode()?;
-                                stdout().execute(LeaveAlternateScreen)?;
+                                restore_terminal();
                                 let status = Command::new("claude")
                                     .arg("--dangerously-skip-permissions")
                                     .current_dir(&dir.path)
@@ -329,10 +328,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            remote::open_remote_session(&ssh_host, session);
-
                             restore_terminal();
-                            std::process::exit(0);
+                            let status = remote::open_remote_session(&ssh_host, session);
+                            std::process::exit(status.code().unwrap_or(0));
                         }
                     }
                     View::FolderSessions | View::AllSessions => {
@@ -343,10 +341,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             let sid = session.id.clone();
-                            let cwd = session
-                                .last_cwd
-                                .clone()
-                                .unwrap_or_else(|| session.project.clone());
+                            let cwd = session.project.clone();
 
                             restore_terminal();
 
