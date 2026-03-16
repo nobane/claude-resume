@@ -125,22 +125,18 @@ pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
 
-    // When using waypipe, inject WAYLAND_DISPLAY into the tmux session so
-    // GUI apps work. set-environment updates tmux's env so new panes and
-    // processes spawned via tmux inherit it. For existing sessions where
-    // Claude is already running, we also set-option update-environment so
-    // tmux propagates it on reattach.
+    // When using waypipe, inject WAYLAND_DISPLAY into the tmux session.
+    // zsh on beau doesn't propagate the env var set by waypipe, but bash
+    // and `env` can see it. Use bash -c to read it reliably from the
+    // process environment and inject into tmux.
     let wayland_inject = if gpu {
         format!(
-            "if [ -n \"$WAYLAND_DISPLAY\" ]; then \
-             /usr/bin/tmux set-option -g update-environment 'WAYLAND_DISPLAY XDG_RUNTIME_DIR' 2>/dev/null; \
-             if /usr/bin/tmux has-session -t {} 2>/dev/null; then \
-               /usr/bin/tmux set-environment -t {} WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\"; \
-               /usr/bin/tmux set-environment -t {} XDG_RUNTIME_DIR \"$XDG_RUNTIME_DIR\"; \
-             fi; fi && ",
-            shell_escape(&tmux_name),
-            shell_escape(&tmux_name),
-            shell_escape(&tmux_name),
+            "bash -c 'WD=$(printenv WAYLAND_DISPLAY); XRD=$(printenv XDG_RUNTIME_DIR); \
+             if [ -n \"$WD\" ]; then \
+               /usr/bin/tmux set-environment -t {tn} WAYLAND_DISPLAY \"$WD\" 2>/dev/null; \
+               /usr/bin/tmux set-environment -t {tn} XDG_RUNTIME_DIR \"$XRD\" 2>/dev/null; \
+             fi' && ",
+            tn = shell_escape(&tmux_name),
         )
     } else {
         String::new()
