@@ -90,6 +90,8 @@ pub struct ActiveInfo {
     pub pid: u32,
     pub workspace: Option<String>,
     pub window_address: Option<String>,
+    /// If this process was started with --resume <id>, the original session ID.
+    pub resumed_from: Option<String>,
 }
 
 pub struct Session {
@@ -131,6 +133,25 @@ fn find_terminal_pid(mut pid: u32) -> Option<u32> {
         let rest = &stat[comm_end + 2..];
         let ppid: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
         pid = ppid;
+    }
+    None
+}
+
+/// Read the --resume argument from a process's cmdline to find the original session ID.
+fn read_resume_arg(pid: u32) -> Option<String> {
+    let cmdline = fs::read_to_string(format!("/proc/{}/cmdline", pid)).ok()?;
+    let args: Vec<&str> = cmdline.split('\0').collect();
+    let mut found_resume = false;
+    for arg in &args {
+        if found_resume {
+            let id = arg.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+        if *arg == "--resume" {
+            found_resume = true;
+        }
     }
     None
 }
@@ -187,10 +208,12 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
     let mut active = HashMap::new();
     for (sid, claude_pid) in session_pids {
         let terminal_pid = find_terminal_pid(claude_pid);
+        let resumed_from = read_resume_arg(claude_pid);
         let mut info = ActiveInfo {
             pid: claude_pid,
             workspace: None,
             window_address: None,
+            resumed_from,
         };
 
         if let Some(tpid) = terminal_pid {
@@ -385,6 +408,22 @@ pub fn load_sessions() -> Vec<Session> {
     let mut active = find_active_sessions();
     let session_cwd_map = build_session_cwd_map();
 
+    // Remap active sessions that were started with --resume <original-id>:
+    // move their ActiveInfo to the original session ID so the original session
+    // shows as active (instead of a phantom entry with no messages).
+    let remapped: Vec<(String, String)> = active
+        .iter()
+        .filter_map(|(sid, info)| {
+            info.resumed_from.as_ref().map(|orig| (sid.clone(), orig.clone()))
+        })
+        .collect();
+    for (ephemeral_sid, original_sid) in remapped {
+        if let Some(mut info) = active.remove(&ephemeral_sid) {
+            info.resumed_from = None; // Clear to avoid confusion
+            active.entry(original_sid).or_insert(info);
+        }
+    }
+
     let mut msg_map: HashMap<String, Vec<(u64, String)>> = HashMap::new();
     let mut meta_map: HashMap<String, (String, Option<String>)> = HashMap::new();
 
@@ -464,8 +503,13 @@ pub fn load_sessions() -> Vec<Session> {
         });
     }
 
-    // Add active sessions that had no history.jsonl entries
+    // Add active sessions that had no history.jsonl entries.
+    // Only include if they also have a resumable transcript file — otherwise
+    // they're phantom entries (e.g. from --resume with ephemeral IDs or broken processes).
     for (sid, info) in active {
+        if !resumable.contains_key(&sid) {
+            continue;
+        }
         let cwd = session_cwd_map.get(&sid).cloned();
         let project = cwd.clone().unwrap_or_default();
         let display_msg = format!("(running in {})", short_project(&project));
