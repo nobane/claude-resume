@@ -99,6 +99,20 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if a session's tmux session exists on the remote host.
+pub fn is_in_tmux_session(ssh_host: &str, session_id: &str) -> bool {
+    let short_id = &session_id[..8.min(session_id.len())];
+    let tmux_name = format!("claude-{}", short_id);
+    Command::new("ssh")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg(ssh_host)
+        .arg(format!("/usr/bin/tmux has-session -t {}", shell_escape(&tmux_name)))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str) -> std::process::ExitStatus {
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);

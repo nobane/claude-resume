@@ -330,12 +330,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = session;
 
                             if let Some(pid) = active_pid {
-                                app.status_msg = Some(format!("Killing PID {} on {}...", pid, host_name));
-                                terminal.draw(|f| ui::draw(f, &app))?;
+                                // Check if it's running inside a tmux session — if so,
+                                // just attach instead of killing. Only kill if not in tmux.
+                                let in_tmux = remote::is_in_tmux_session(&ssh_host, &session_id);
+                                if !in_tmux {
+                                    app.status_msg = Some(format!("Killing PID {} on {}...", pid, host_name));
+                                    terminal.draw(|f| ui::draw(f, &app))?;
 
-                                if remote::is_remote_pid_alive(&ssh_host, pid) {
-                                    let _ = remote::kill_remote_pid(&ssh_host, pid);
-                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                    if remote::is_remote_pid_alive(&ssh_host, pid) {
+                                        let _ = remote::kill_remote_pid(&ssh_host, pid);
+                                        std::thread::sleep(std::time::Duration::from_millis(500));
+                                    }
                                 }
                             }
 
