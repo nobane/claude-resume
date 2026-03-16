@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::process::Command;
 
 use crate::config::HostConfig;
+use crate::session::Turn;
 
 #[derive(Deserialize)]
 struct RemoteSessionJson {
@@ -13,7 +14,7 @@ struct RemoteSessionJson {
     last_msg: String,
     last_cwd: Option<String>,
     active_pid: Option<u32>,
-    messages: Vec<String>,
+    messages: Vec<Turn>,
 }
 
 #[derive(Deserialize)]
@@ -31,7 +32,7 @@ pub struct RemoteSession {
     pub last_msg: String,
     pub last_cwd: Option<String>,
     pub active_pid: Option<u32>,
-    pub messages: Vec<String>,
+    pub messages: Vec<Turn>,
     #[allow(dead_code)]
     pub host: String,
 }

@@ -27,7 +27,7 @@ struct JsonSession {
     last_msg: String,
     last_cwd: Option<String>,
     active_pid: Option<u32>,
-    messages: Vec<String>,
+    messages: Vec<session::Turn>,
 }
 
 #[derive(Serialize)]

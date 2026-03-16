@@ -1,8 +1,9 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
     io::{self, BufRead},
+    path::PathBuf,
     process::Command,
 };
 
@@ -29,6 +30,12 @@ struct HyprWorkspace {
     name: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Turn {
+    pub role: String, // "user" or "assistant"
+    pub text: String,
+}
+
 /// Info about an active session's window
 pub struct ActiveInfo {
     pub pid: u32,
@@ -45,7 +52,7 @@ pub struct Session {
     pub last_msg: String,
     pub last_cwd: Option<String>,
     pub active: Option<ActiveInfo>,
-    pub messages: Vec<String>,
+    pub messages: Vec<Turn>,
 }
 
 pub struct Project {
@@ -153,7 +160,8 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
     active
 }
 
-pub fn find_resumable_sessions() -> HashMap<String, Option<String>> {
+/// Returns (last_cwd, session_file_path) for each resumable session.
+pub fn find_resumable_sessions() -> HashMap<String, (Option<String>, PathBuf)> {
     let projects_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".claude/projects");
@@ -182,7 +190,7 @@ pub fn find_resumable_sessions() -> HashMap<String, Option<String>> {
                 }
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     let last_cwd = read_last_cwd(&path);
-                    resumable.insert(stem.to_string(), last_cwd);
+                    resumable.insert(stem.to_string(), (last_cwd, path.clone()));
                 }
             }
         }
@@ -201,6 +209,93 @@ fn read_last_cwd(path: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Read user/assistant turns from a session JSONL file.
+fn read_session_turns(path: &std::path::Path) -> Vec<Turn> {
+    let file = match fs::read_to_string(path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+
+    let mut turns: Vec<Turn> = Vec::new();
+    // Track last assistant text to deduplicate streaming chunks
+    let mut last_assistant_text: Option<String> = None;
+
+    for line in file.lines() {
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let msg_type = match val.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        if msg_type != "user" && msg_type != "assistant" {
+            continue;
+        }
+
+        let content = match val.get("message").and_then(|m| m.get("content")) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let text = extract_text_content(content);
+        if text.is_empty() {
+            continue;
+        }
+
+        if msg_type == "assistant" {
+            // Claude streams multiple assistant entries per turn; keep the longest
+            if let Some(ref prev) = last_assistant_text {
+                if text.len() > prev.len() {
+                    last_assistant_text = Some(text);
+                    // Update the last turn in place
+                    if let Some(last) = turns.last_mut() {
+                        last.text = last_assistant_text.as_ref().unwrap().clone();
+                    }
+                }
+            } else {
+                last_assistant_text = Some(text.clone());
+                turns.push(Turn {
+                    role: "assistant".into(),
+                    text,
+                });
+            }
+        } else {
+            // New user message resets assistant tracking
+            last_assistant_text = None;
+            turns.push(Turn {
+                role: "user".into(),
+                text,
+            });
+        }
+    }
+
+    turns
+}
+
+/// Extract text from a message content field (string or array of content blocks).
+fn extract_text_content(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Array(arr) => {
+            let texts: Vec<&str> = arr
+                .iter()
+                .filter_map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        block.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            texts.join(" ").trim().to_string()
+        }
+        _ => String::new(),
+    }
 }
 
 /// Build a map of session_id -> cwd from all PID files in ~/.claude/sessions/
@@ -261,7 +356,7 @@ pub fn load_sessions() -> Vec<Session> {
             None => continue,
         };
 
-        let last_cwd = if let Some(cwd) = resumable.get(&sid) {
+        let last_cwd = if let Some((cwd, _path)) = resumable.get(&sid) {
             cwd.clone()
         } else if active.contains_key(&sid) {
             None
@@ -294,7 +389,16 @@ pub fn load_sessions() -> Vec<Session> {
             .unwrap_or_default();
         let last_ts = msgs.last().map(|(ts, _)| *ts).unwrap_or(0);
         let msg_count = msgs.len();
-        let messages: Vec<String> = msgs.into_iter().map(|(_, d)| d).collect();
+
+        // Read full conversation turns from session file
+        let messages = if let Some((_cwd, path)) = resumable.get(&sid) {
+            read_session_turns(path)
+        } else {
+            // Fallback: user messages only from history
+            msgs.into_iter()
+                .map(|(_, d)| Turn { role: "user".into(), text: d })
+                .collect()
+        };
 
         let active_info = active.remove(&sid);
 
@@ -574,5 +678,71 @@ mod tests {
         assert_eq!(msg_map["sess-2"].len(), 1);
         assert_eq!(msg_map["sess-1"][0].1, "hello world");
         assert_eq!(msg_map["sess-1"][1].1, "second msg");
+    }
+
+    #[test]
+    fn test_extract_text_content_string() {
+        let val = serde_json::json!("hello world");
+        assert_eq!(extract_text_content(&val), "hello world");
+    }
+
+    #[test]
+    fn test_extract_text_content_array() {
+        let val = serde_json::json!([
+            {"type": "text", "text": "Hello"},
+            {"type": "tool_use", "name": "bash"},
+            {"type": "text", "text": "World"}
+        ]);
+        assert_eq!(extract_text_content(&val), "Hello World");
+    }
+
+    #[test]
+    fn test_extract_text_content_empty() {
+        let val = serde_json::json!([{"type": "tool_use", "name": "bash"}]);
+        assert_eq!(extract_text_content(&val), "");
+    }
+
+    #[test]
+    fn test_read_session_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-session.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+
+        // Write a minimal conversation: user, assistant, assistant (streaming), user, assistant
+        writeln!(f, r#"{{"type":"user","message":{{"role":"user","content":"What is 2+2?"}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":"The answer"}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":"The answer is 4."}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"user","message":{{"role":"user","content":"Thanks!"}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"You're welcome!"}}]}}}}"#).unwrap();
+        drop(f);
+
+        let turns = read_session_turns(&path);
+        assert_eq!(turns.len(), 4);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].text, "What is 2+2?");
+        assert_eq!(turns[1].role, "assistant");
+        assert_eq!(turns[1].text, "The answer is 4."); // Kept longest streaming chunk
+        assert_eq!(turns[2].role, "user");
+        assert_eq!(turns[2].text, "Thanks!");
+        assert_eq!(turns[3].role, "assistant");
+        assert_eq!(turns[3].text, "You're welcome!");
+    }
+
+    #[test]
+    fn test_read_session_turns_skips_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-session.jsonl");
+        let mut f = fs::File::create(&path).unwrap();
+
+        writeln!(f, r#"{{"type":"user","message":{{"role":"user","content":"Hi"}}}}"#).unwrap();
+        // Assistant with only tool_use, no text
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"tool_use","name":"bash"}}]}}}}"#).unwrap();
+        writeln!(f, r#"{{"type":"user","message":{{"role":"user","content":"Ok"}}}}"#).unwrap();
+        drop(f);
+
+        let turns = read_session_turns(&path);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].text, "Hi");
+        assert_eq!(turns[1].text, "Ok");
     }
 }

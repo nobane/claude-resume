@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, View};
-use crate::session::{format_time_ago, short_project};
+use crate::session::{format_time_ago, short_project, Turn};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
@@ -216,7 +216,7 @@ struct SessionRow<'a> {
     active_marker: String,
     last_msg: &'a str,
     msg_count: usize,
-    messages: &'a [String],
+    messages: &'a [Turn],
 }
 
 fn draw_session_list<'a>(
@@ -277,25 +277,37 @@ fn draw_session_list<'a>(
                 let end = msg_count.saturating_sub(skip);
 
                 for i in (start..end).rev() {
-                    let msg = &s.messages[i];
-                    let label = format!("  [{}] ", i + 1);
-                    let label_len = label.len();
+                    let turn = &s.messages[i];
+                    let is_assistant = turn.role == "assistant";
+                    let role_label = if is_assistant { "  claude " } else { "  you    " };
+                    let role_color = if is_assistant {
+                        Color::Rgb(180, 130, 255) // purple for assistant
+                    } else {
+                        Color::Rgb(100, 180, 100) // green for user
+                    };
+                    let text_color = if is_assistant {
+                        Color::Rgb(140, 140, 160)
+                    } else {
+                        Color::Rgb(170, 170, 185)
+                    };
+
+                    let label_len = role_label.len();
                     let msg_lines = wrap_text(
-                        msg,
+                        &turn.text,
                         w.saturating_sub(2),
                         label_len,
-                        Style::default().fg(Color::Rgb(150, 150, 165)),
+                        Style::default().fg(text_color),
                     );
                     if let Some(_first) = msg_lines.first() {
                         let mut first_spans = vec![Span::styled(
-                            label.clone(),
-                            Style::default().fg(Color::Rgb(70, 70, 90)),
+                            role_label.to_string(),
+                            Style::default().fg(role_color),
                         )];
                         let text_part: String =
-                            msg.chars().take(w.saturating_sub(label_len + 2)).collect();
+                            turn.text.chars().take(w.saturating_sub(label_len + 2)).collect();
                         first_spans.push(Span::styled(
                             text_part,
-                            Style::default().fg(Color::Rgb(150, 150, 165)),
+                            Style::default().fg(text_color),
                         ));
                         lines.push(Line::from(first_spans));
                         for wrap_line in msg_lines.iter().skip(1) {
