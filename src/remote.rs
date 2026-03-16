@@ -125,16 +125,12 @@ pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str
     let short_id = &session_id[..8.min(session_id.len())];
 
     if gpu {
-        // With waypipe: always create a fresh tmux session so Claude inherits
-        // WAYLAND_DISPLAY from the waypipe shell. Use a gpu-prefixed name to
-        // avoid colliding with any existing non-waypipe tmux session.
-        let tmux_name = format!("gpu-claude-{}", short_id);
+        // With waypipe: run Claude directly (no tmux). Waypipe needs to be
+        // the parent process so WAYLAND_DISPLAY is inherited. tmux would
+        // break this because waypipe server only wraps the first command
+        // in the chain. Claude --resume works fine without tmux.
         let ssh_cmd = format!(
-            "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && \
-             /usr/bin/tmux kill-session -t {} 2>/dev/null; \
-             /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
-            shell_escape(&tmux_name),
-            shell_escape(&tmux_name),
+            "cd {} && exec $HOME/.local/bin/claude --dangerously-skip-permissions --resume {}",
             shell_escape(project),
             session_id,
         );
@@ -209,12 +205,20 @@ pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>
 }
 
 pub fn open_new_remote_session(ssh_host: &str, dir: &str, gpu: bool) -> std::process::ExitStatus {
-    let ssh_cmd = format!(
-        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
-        shell_escape(dir),
-    );
-
-    run_ssh(ssh_host, &ssh_cmd, gpu)
+    if gpu {
+        // With waypipe: run Claude directly so it inherits WAYLAND_DISPLAY.
+        let ssh_cmd = format!(
+            "cd {} && exec $HOME/.local/bin/claude --dangerously-skip-permissions",
+            shell_escape(dir),
+        );
+        run_ssh(ssh_host, &ssh_cmd, gpu)
+    } else {
+        let ssh_cmd = format!(
+            "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
+            shell_escape(dir),
+        );
+        run_ssh(ssh_host, &ssh_cmd, gpu)
+    }
 }
 
 pub fn shell_escape(s: &str) -> String {
