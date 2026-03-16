@@ -5,7 +5,8 @@ mod session;
 mod ui;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    cursor,
+    event::{self, Event, KeyCode, KeyModifiers, DisableMouseCapture},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -43,6 +44,15 @@ fn focus_active_session(session: &Session) {
                 .output();
         }
     }
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
+    let _ = stdout().execute(DisableMouseCapture);
+    let _ = stdout().execute(cursor::Show);
+    // Reset terminal modes via ANSI escapes
+    let _ = stdout().execute(crossterm::style::ResetColor);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -136,8 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if app.view == View::NewRemoteSession {
                                 let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
                                 remote::open_new_remote_session(&ssh_host, &dir.path);
-                                disable_raw_mode()?;
-                                stdout().execute(LeaveAlternateScreen)?;
+                                restore_terminal();
                                 std::process::exit(0);
                             } else {
                                 // Local: replace TUI process with claude
@@ -322,8 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             remote::open_remote_session(&ssh_host, session);
 
-                            disable_raw_mode()?;
-                            stdout().execute(LeaveAlternateScreen)?;
+                            restore_terminal();
                             std::process::exit(0);
                         }
                     }
@@ -340,8 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .clone()
                                 .unwrap_or_else(|| session.project.clone());
 
-                            disable_raw_mode()?;
-                            stdout().execute(LeaveAlternateScreen)?;
+                            restore_terminal();
 
                             let status = Command::new("claude")
                                 .arg("--dangerously-skip-permissions")
@@ -368,7 +375,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    restore_terminal();
     Ok(())
 }

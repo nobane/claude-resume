@@ -106,7 +106,7 @@ pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) {
     let tmux_name = format!("claude-{}", short_id);
 
     let ssh_cmd = format!(
-        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TERM=xterm-256color && /usr/bin/tmux attach-session -t {} 2>/dev/null || /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
+        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux attach-session -t {} 2>/dev/null || /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
         shell_escape(&tmux_name),
         shell_escape(&tmux_name),
         shell_escape(cwd),
@@ -178,7 +178,7 @@ pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>
 
 pub fn open_new_remote_session(ssh_host: &str, dir: &str) {
     let ssh_cmd = format!(
-        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TERM=xterm-256color && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
+        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
         shell_escape(dir),
     );
 
