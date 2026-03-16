@@ -313,7 +313,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 KeyCode::Enter => match app.view {
                     View::Folders => app.enter_folder(),
-                    View::RemoteHosts => app.enter_remote_host(),
+                    View::RemoteHosts => {
+                        if let Some(host) = app.start_remote_host_load() {
+                            terminal.draw(|f| ui::draw(f, &app))?;
+                            let result = remote::fetch_remote_sessions(&host);
+                            app.finish_remote_host_load(result);
+                        }
+                    }
                     View::RemoteSessions => {
                         if let Some(session) = app.selected_remote_session() {
                             let ssh_host = app.remote_selected_host.clone().unwrap_or_default();

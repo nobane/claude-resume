@@ -339,21 +339,28 @@ impl App {
         }
     }
 
-    pub fn enter_remote_host(&mut self) {
+    /// Prepare to load a remote host (sets loading state). Returns the host config
+    /// for the caller to fetch sessions and call `finish_remote_host_load`.
+    pub fn start_remote_host_load(&mut self) -> Option<config::HostConfig> {
         let idx = match self.remote_host_state.selected() {
             Some(i) => i,
-            None => return,
+            None => return None,
         };
         let host = match self.remote_hosts.get(idx) {
             Some(h) => h.clone(),
-            None => return,
+            None => return None,
         };
 
         self.remote_loading = true;
         self.remote_selected_host = Some(host.ssh.clone());
         self.remote_selected_host_name = Some(host.name.clone());
+        self.status_msg = Some(format!("Connecting to {}...", host.name));
+        Some(host)
+    }
 
-        match remote::fetch_remote_sessions(&host) {
+    /// Finish loading remote sessions after the fetch completes.
+    pub fn finish_remote_host_load(&mut self, result: Result<Vec<remote::RemoteSession>, String>) {
+        match result {
             Ok(mut sessions) => {
                 sessions.sort_by(|a, b| {
                     let a_active = a.active_pid.is_some();
@@ -373,6 +380,7 @@ impl App {
             }
         }
         self.remote_loading = false;
+        self.status_msg = None;
         self.expand_lines = 0;
     }
 
