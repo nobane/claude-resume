@@ -44,6 +44,7 @@ pub struct App {
     pub dir_query: String,
     pub recent_dirs: Vec<String>,
     pub prev_view: Option<Box<View>>,
+    pub status_msg: Option<String>,
 }
 
 impl App {
@@ -116,6 +117,7 @@ impl App {
             dir_query: String::new(),
             recent_dirs,
             prev_view: None,
+            status_msg: None,
         }
     }
 

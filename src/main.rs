@@ -145,11 +145,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if app.view == View::NewRemoteSession {
                                 let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
+                                let host_name = app.remote_selected_host_name.clone().unwrap_or_default();
+                                app.status_msg = Some(format!("Connecting to {}...", host_name));
+                                terminal.draw(|f| ui::draw(f, &app))?;
                                 restore_terminal();
                                 let status = remote::open_new_remote_session(&ssh_host, &dir.path);
                                 std::process::exit(status.code().unwrap_or(0));
                             } else {
                                 // Local: replace TUI process with claude
+                                app.status_msg = Some("Starting session...".into());
+                                terminal.draw(|f| ui::draw(f, &app))?;
                                 restore_terminal();
                                 let status = Command::new("claude")
                                     .arg("--dangerously-skip-permissions")
@@ -312,17 +317,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     View::RemoteSessions => {
                         if let Some(session) = app.selected_remote_session() {
                             let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
+                            let host_name = app.remote_selected_host_name.clone().unwrap_or_default();
+                            let active_pid = session.active_pid;
+                            let session_id = session.id.clone();
+                            let project = session.project.clone();
+                            let _ = session;
 
-                            if let Some(pid) = session.active_pid {
-                                // Verify PID is actually still alive before killing
+                            if let Some(pid) = active_pid {
+                                app.status_msg = Some(format!("Killing PID {} on {}...", pid, host_name));
+                                terminal.draw(|f| ui::draw(f, &app))?;
+
                                 if remote::is_remote_pid_alive(&ssh_host, pid) {
                                     let _ = remote::kill_remote_pid(&ssh_host, pid);
                                     std::thread::sleep(std::time::Duration::from_millis(500));
                                 }
                             }
 
+                            app.status_msg = Some(format!("Connecting to {}...", host_name));
+                            terminal.draw(|f| ui::draw(f, &app))?;
+
                             restore_terminal();
-                            let status = remote::open_remote_session(&ssh_host, session);
+                            let status = remote::open_remote_session_by_id(&ssh_host, &session_id, &project);
                             std::process::exit(status.code().unwrap_or(0));
                         }
                     }
@@ -335,6 +350,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             let sid = session.id.clone();
                             let cwd = session.project.clone();
+
+                            app.status_msg = Some("Resuming session...".into());
+                            terminal.draw(|f| ui::draw(f, &app))?;
 
                             restore_terminal();
 

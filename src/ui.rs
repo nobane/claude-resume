@@ -95,7 +95,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::NewSession | View::NewRemoteSession => draw_new_session(f, app, chunks[1]),
     }
 
-    let footer_text = if matches!(app.view, View::NewSession | View::NewRemoteSession) {
+    let footer_text = if let Some(ref msg) = app.status_msg {
+        Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Yellow)),
+            Span::styled(msg.as_str(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ])
+    } else if matches!(app.view, View::NewSession | View::NewRemoteSession) {
         Line::from(vec![
             Span::styled(" > ", Style::default().fg(Color::Yellow)),
             Span::raw(&app.dir_query),

@@ -99,19 +99,16 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) -> std::process::ExitStatus {
-    // Must use project dir (not last_cwd) because Claude Code registers
-    // sessions under the project path it was started from
-    let cwd = &session.project;
-    let short_id = &session.id[..8.min(session.id.len())];
+pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str) -> std::process::ExitStatus {
+    let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
 
     let ssh_cmd = format!(
         "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux attach-session -t {} 2>/dev/null || /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
         shell_escape(&tmux_name),
         shell_escape(&tmux_name),
-        shell_escape(cwd),
-        &session.id,
+        shell_escape(project),
+        session_id,
     );
 
     Command::new("ssh")
