@@ -30,10 +30,59 @@ struct HyprWorkspace {
     name: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct Turn {
     pub role: String, // "user" or "assistant"
     pub text: String,
+}
+
+// Deserialize Turn from either {"role":"...","text":"..."} or a plain string (legacy)
+impl<'de> Deserialize<'de> for Turn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct TurnVisitor;
+
+        impl<'de> de::Visitor<'de> for TurnVisitor {
+            type Value = Turn;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a Turn object or a string")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Turn, E> {
+                Ok(Turn {
+                    role: "user".into(),
+                    text: v.to_string(),
+                })
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Turn, E> {
+                Ok(Turn {
+                    role: "user".into(),
+                    text: v,
+                })
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, map: M) -> Result<Turn, M::Error> {
+                #[derive(Deserialize)]
+                struct TurnInner {
+                    role: String,
+                    text: String,
+                }
+                let inner = TurnInner::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(Turn {
+                    role: inner.role,
+                    text: inner.text,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(TurnVisitor)
+    }
 }
 
 /// Info about an active session's window
@@ -744,5 +793,28 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].text, "Hi");
         assert_eq!(turns[1].text, "Ok");
+    }
+
+    #[test]
+    fn test_turn_deserialize_from_string() {
+        // Legacy format: plain strings (from old remote binaries)
+        let json = r#"["hello","world"]"#;
+        let turns: Vec<Turn> = serde_json::from_str(json).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].text, "hello");
+        assert_eq!(turns[1].text, "world");
+    }
+
+    #[test]
+    fn test_turn_deserialize_from_object() {
+        // New format: Turn objects
+        let json = r#"[{"role":"user","text":"hi"},{"role":"assistant","text":"hello!"}]"#;
+        let turns: Vec<Turn> = serde_json::from_str(json).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].text, "hi");
+        assert_eq!(turns[1].role, "assistant");
+        assert_eq!(turns[1].text, "hello!");
     }
 }
