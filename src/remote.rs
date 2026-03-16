@@ -1,31 +1,7 @@
 use serde::Deserialize;
 use std::process::Command;
 
-#[derive(Deserialize, Clone)]
-pub struct HostConfig {
-    pub name: String,
-    pub ssh: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct HostsFile {
-    #[serde(default)]
-    host: Vec<HostConfig>,
-}
-
-pub fn load_hosts() -> Vec<HostConfig> {
-    let path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config/claude-resume/hosts.toml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    match toml::from_str::<HostsFile>(&content) {
-        Ok(f) => f.host,
-        Err(_) => vec![],
-    }
-}
+use crate::config::HostConfig;
 
 #[derive(Deserialize)]
 struct RemoteSessionJson {
@@ -50,11 +26,13 @@ pub struct RemoteSession {
     pub project: String,
     pub last_ts: u64,
     pub msg_count: usize,
+    #[allow(dead_code)]
     pub first_msg: String,
     pub last_msg: String,
     pub last_cwd: Option<String>,
     pub active_pid: Option<u32>,
     pub messages: Vec<String>,
+    #[allow(dead_code)]
     pub host: String,
 }
 
@@ -94,6 +72,18 @@ pub fn fetch_remote_sessions(host: &HostConfig) -> Result<Vec<RemoteSession>, St
         .collect())
 }
 
+/// Check if a PID is still running on the remote host
+pub fn is_remote_pid_alive(ssh_host: &str, pid: u32) -> bool {
+    Command::new("ssh")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg(ssh_host)
+        .arg(format!("kill -0 {}", pid))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
     let output = Command::new("ssh")
         .arg(ssh_host)
@@ -109,22 +99,18 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
 }
 
 pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) {
-    let cwd = session
-        .last_cwd
-        .as_deref()
-        .unwrap_or(&session.project);
+    // Must use project dir (not last_cwd) because Claude Code registers
+    // sessions under the project path it was started from
+    let cwd = &session.project;
     let short_id = &session.id[..8.min(session.id.len())];
     let tmux_name = format!("claude-{}", short_id);
 
-    // Full paths since non-interactive SSH doesn't load shell profile
-    // Set UTF-8 locale so box-drawing chars and icons render correctly
-    // If tmux session already exists, reattach; otherwise create new
     let ssh_cmd = format!(
-        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TERM=xterm-256color && /usr/bin/tmux attach-session -t {} 2>/dev/null || (cd {} && /usr/bin/tmux new-session -s {} '~/.local/bin/claude --dangerously-skip-permissions --resume {}')",
+        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TERM=xterm-256color && /usr/bin/tmux attach-session -t {} 2>/dev/null || /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
+        shell_escape(&tmux_name),
         shell_escape(&tmux_name),
         shell_escape(cwd),
-        shell_escape(&tmux_name),
-        shell_escape(&session.id),
+        &session.id,
     );
 
     let _ = Command::new("foot")
@@ -136,6 +122,105 @@ pub fn open_remote_session(ssh_host: &str, session: &RemoteSession) {
         .spawn();
 }
 
-fn shell_escape(s: &str) -> String {
+pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>, String> {
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg(ssh_host)
+        .arg("~/.local/bin/claude-resume --list-dirs")
+        .output()
+        .map_err(|e| format!("SSH failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("SSH error: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    #[derive(Deserialize)]
+    struct RemoteDirEntry {
+        path: String,
+        has_claude_md: bool,
+        has_git: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct RemoteDirsOutput {
+        dirs: Vec<RemoteDirEntry>,
+    }
+
+    let remote: RemoteDirsOutput =
+        serde_json::from_str(&stdout).map_err(|e| format!("Parse error: {}", e))?;
+
+    Ok(remote
+        .dirs
+        .into_iter()
+        .map(|d| {
+            let display = d.path.clone(); // Remote paths shown as-is
+            let mut score: i32 = 0;
+            if d.has_claude_md {
+                score += 100;
+            }
+            if d.has_git {
+                score += 10;
+            }
+            crate::session::DirEntry {
+                path: d.path,
+                display,
+                has_claude_md: d.has_claude_md,
+                has_git: d.has_git,
+                score,
+            }
+        })
+        .collect())
+}
+
+pub fn open_new_remote_session(ssh_host: &str, dir: &str) {
+    let ssh_cmd = format!(
+        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TERM=xterm-256color && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
+        shell_escape(dir),
+    );
+
+    let _ = Command::new("foot")
+        .arg("-e")
+        .arg("ssh")
+        .arg("-t")
+        .arg(ssh_host)
+        .arg(&ssh_cmd)
+        .spawn();
+}
+
+pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_escape_spaces() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn test_shell_escape_single_quotes() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_escape_empty() {
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    #[test]
+    fn test_shell_escape_special_chars() {
+        assert_eq!(shell_escape("a\"b$c"), "'a\"b$c'");
+    }
 }
