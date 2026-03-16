@@ -123,34 +123,35 @@ fn run_ssh(ssh_host: &str, remote_cmd: &str, gpu: bool) -> std::process::ExitSta
 
 pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str, gpu: bool) -> std::process::ExitStatus {
     let short_id = &session_id[..8.min(session_id.len())];
-    let tmux_name = format!("claude-{}", short_id);
 
-    // When using waypipe, inject WAYLAND_DISPLAY into the tmux session.
-    // zsh on beau doesn't propagate the env var set by waypipe, but bash
-    // and `env` can see it. Use bash -c to read it reliably from the
-    // process environment and inject into tmux.
-    let wayland_inject = if gpu {
-        format!(
-            "bash -c 'WD=$(printenv WAYLAND_DISPLAY); XRD=$(printenv XDG_RUNTIME_DIR); \
-             if [ -n \"$WD\" ]; then \
-               /usr/bin/tmux set-environment -t {tn} WAYLAND_DISPLAY \"$WD\" 2>/dev/null; \
-               /usr/bin/tmux set-environment -t {tn} XDG_RUNTIME_DIR \"$XRD\" 2>/dev/null; \
-             fi' && ",
-            tn = shell_escape(&tmux_name),
-        )
+    if gpu {
+        // With waypipe: always create a fresh tmux session so Claude inherits
+        // WAYLAND_DISPLAY from the waypipe shell. Use a gpu-prefixed name to
+        // avoid colliding with any existing non-waypipe tmux session.
+        let tmux_name = format!("gpu-claude-{}", short_id);
+        let ssh_cmd = format!(
+            "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && \
+             /usr/bin/tmux kill-session -t {} 2>/dev/null; \
+             /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
+            shell_escape(&tmux_name),
+            shell_escape(&tmux_name),
+            shell_escape(project),
+            session_id,
+        );
+        run_ssh(ssh_host, &ssh_cmd, gpu)
     } else {
-        String::new()
-    };
-
-    let ssh_cmd = format!(
-        "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && {wayland_inject}/usr/bin/tmux attach-session -t {} 2>/dev/null || /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
-        shell_escape(&tmux_name),
-        shell_escape(&tmux_name),
-        shell_escape(project),
-        session_id,
-    );
-
-    run_ssh(ssh_host, &ssh_cmd, gpu)
+        let tmux_name = format!("claude-{}", short_id);
+        let ssh_cmd = format!(
+            "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && \
+             /usr/bin/tmux attach-session -t {} 2>/dev/null || \
+             /usr/bin/tmux new-session -s {} -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions --resume {}\"",
+            shell_escape(&tmux_name),
+            shell_escape(&tmux_name),
+            shell_escape(project),
+            session_id,
+        );
+        run_ssh(ssh_host, &ssh_cmd, gpu)
+    }
 }
 
 pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>, String> {
