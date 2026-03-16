@@ -4,6 +4,8 @@ use serde::Deserialize;
 pub struct HostConfig {
     pub name: String,
     pub ssh: String,
+    #[serde(default)]
+    pub gpu: bool,
 }
 
 #[derive(Deserialize)]

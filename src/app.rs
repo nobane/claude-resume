@@ -35,6 +35,7 @@ pub struct App {
     pub remote_session_state: ListState,
     pub remote_selected_host: Option<String>,
     pub remote_selected_host_name: Option<String>,
+    pub remote_gpu: bool,
     pub remote_error: Option<String>,
     pub remote_loading: bool,
     // New session directory picker
@@ -109,6 +110,7 @@ impl App {
             remote_session_state: ListState::default(),
             remote_selected_host: None,
             remote_selected_host_name: None,
+            remote_gpu: false,
             remote_error: None,
             remote_loading: false,
             dir_list: Vec::new(),
@@ -354,6 +356,7 @@ impl App {
         self.remote_loading = true;
         self.remote_selected_host = Some(host.ssh.clone());
         self.remote_selected_host_name = Some(host.name.clone());
+        self.remote_gpu = host.gpu;
         self.status_msg = Some(format!("Connecting to {}...", host.name));
         Some(host)
     }

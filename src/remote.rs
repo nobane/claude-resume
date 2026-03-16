@@ -99,7 +99,29 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str) -> std::process::ExitStatus {
+/// Run an SSH command, optionally wrapped with waypipe for GPU/GUI forwarding.
+fn run_ssh(ssh_host: &str, remote_cmd: &str, gpu: bool) -> std::process::ExitStatus {
+    if gpu {
+        Command::new("waypipe")
+            .arg("--compress")
+            .arg("zstd")
+            .arg("ssh")
+            .arg("-t")
+            .arg(ssh_host)
+            .arg(remote_cmd)
+            .status()
+            .unwrap_or_else(|_| std::process::ExitStatus::default())
+    } else {
+        Command::new("ssh")
+            .arg("-t")
+            .arg(ssh_host)
+            .arg(remote_cmd)
+            .status()
+            .unwrap_or_else(|_| std::process::ExitStatus::default())
+    }
+}
+
+pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str, gpu: bool) -> std::process::ExitStatus {
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
 
@@ -111,12 +133,7 @@ pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str
         session_id,
     );
 
-    Command::new("ssh")
-        .arg("-t")
-        .arg(ssh_host)
-        .arg(&ssh_cmd)
-        .status()
-        .unwrap_or_else(|_| std::process::ExitStatus::default())
+    run_ssh(ssh_host, &ssh_cmd, gpu)
 }
 
 pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>, String> {
@@ -173,18 +190,13 @@ pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>
         .collect())
 }
 
-pub fn open_new_remote_session(ssh_host: &str, dir: &str) -> std::process::ExitStatus {
+pub fn open_new_remote_session(ssh_host: &str, dir: &str, gpu: bool) -> std::process::ExitStatus {
     let ssh_cmd = format!(
         "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
         shell_escape(dir),
     );
 
-    Command::new("ssh")
-        .arg("-t")
-        .arg(ssh_host)
-        .arg(&ssh_cmd)
-        .status()
-        .unwrap_or_else(|_| std::process::ExitStatus::default())
+    run_ssh(ssh_host, &ssh_cmd, gpu)
 }
 
 pub fn shell_escape(s: &str) -> String {

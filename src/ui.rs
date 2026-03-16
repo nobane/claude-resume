@@ -378,7 +378,7 @@ fn draw_remote_hosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .remote_hosts
         .iter()
         .map(|h| {
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled("  ", Style::default().fg(Color::Magenta)),
                 Span::styled(
                     format!("{:<20} ", h.name),
@@ -388,7 +388,11 @@ fn draw_remote_hosts(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     format!("(ssh {})", h.ssh),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]))
+            ];
+            if h.gpu {
+                spans.push(Span::styled("  GPU", Style::default().fg(Color::Green)));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 

@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.status_msg = Some(format!("Connecting to {}...", host_name));
                                 terminal.draw(|f| ui::draw(f, &app))?;
                                 restore_terminal();
-                                let status = remote::open_new_remote_session(&ssh_host, &dir.path);
+                                let status = remote::open_new_remote_session(&ssh_host, &dir.path, app.remote_gpu);
                                 std::process::exit(status.code().unwrap_or(0));
                             } else {
                                 // Local: replace TUI process with claude
@@ -343,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             terminal.draw(|f| ui::draw(f, &app))?;
 
                             restore_terminal();
-                            let status = remote::open_remote_session_by_id(&ssh_host, &session_id, &project);
+                            let status = remote::open_remote_session_by_id(&ssh_host, &session_id, &project, app.remote_gpu);
                             std::process::exit(status.code().unwrap_or(0));
                         }
                     }
