@@ -46,6 +46,10 @@ pub struct App {
     pub recent_dirs: Vec<String>,
     pub prev_view: Option<Box<View>>,
     pub status_msg: Option<String>,
+    // Path editing for resume
+    pub editing_path: bool,
+    pub edit_path_buf: String,
+    pub edit_session_id: Option<String>,
 }
 
 impl App {
@@ -120,6 +124,9 @@ impl App {
             recent_dirs,
             prev_view: None,
             status_msg: None,
+            editing_path: false,
+            edit_path_buf: String::new(),
+            edit_session_id: None,
         }
     }
 

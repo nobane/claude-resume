@@ -191,6 +191,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
+            if app.editing_path {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.editing_path = false;
+                        app.edit_path_buf.clear();
+                        app.edit_session_id = None;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(sid) = app.edit_session_id.take() {
+                            let cwd = app.edit_path_buf.clone();
+                            app.editing_path = false;
+
+                            app.status_msg = Some("Resuming session...".into());
+                            terminal.draw(|f| ui::draw(f, &app))?;
+
+                            restore_terminal();
+
+                            let status = Command::new("claude")
+                                .arg("--dangerously-skip-permissions")
+                                .arg("--resume")
+                                .arg(&sid)
+                                .current_dir(&cwd)
+                                .status();
+
+                            match status {
+                                Ok(s) => std::process::exit(s.code().unwrap_or(0)),
+                                Err(e) => {
+                                    eprintln!("Failed to launch claude: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        app.edit_path_buf.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.edit_path_buf.push(c);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             if app.filtering {
                 match key.code {
                     KeyCode::Esc => {
@@ -268,6 +312,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.enter_new_remote_session();
                     } else {
                         app.enter_new_session();
+                    }
+                }
+                KeyCode::Char('c') => {
+                    // Edit path before resuming
+                    if matches!(app.view, View::FolderSessions | View::AllSessions) {
+                        if let Some(session) = app.selected_session() {
+                            let path = session.last_cwd.clone()
+                                .unwrap_or_else(|| session.project.clone());
+                            let sid = session.id.clone();
+                            app.edit_path_buf = path;
+                            app.edit_session_id = Some(sid);
+                            app.editing_path = true;
+                        }
                     }
                 }
                 KeyCode::Char('a') => {

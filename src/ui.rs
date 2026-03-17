@@ -95,7 +95,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::NewSession | View::NewRemoteSession => draw_new_session(f, app, chunks[1]),
     }
 
-    let footer_text = if let Some(ref msg) = app.status_msg {
+    let footer_text = if app.editing_path {
+        Line::from(vec![
+            Span::styled(" cd ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(&app.edit_path_buf),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled("    enter", Style::default().fg(Color::Green)),
+            Span::raw(" resume  "),
+            Span::styled("esc", Style::default().fg(Color::Green)),
+            Span::raw(" cancel"),
+        ])
+    } else if let Some(ref msg) = app.status_msg {
         Line::from(vec![
             Span::styled(" ● ", Style::default().fg(Color::Yellow)),
             Span::styled(msg.as_str(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -134,6 +144,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         ) {
             hints.push(Span::styled("l/h", Style::default().fg(Color::Green)));
             hints.push(Span::raw(" expand  "));
+        }
+        if matches!(app.view, View::FolderSessions | View::AllSessions) {
+            hints.push(Span::styled("c", Style::default().fg(Color::Green)));
+            hints.push(Span::raw("d  "));
         }
         hints.push(Span::styled("a", Style::default().fg(Color::Green)));
         hints.push(Span::raw("ll "));
