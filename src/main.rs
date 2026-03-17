@@ -417,7 +417,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             let sid = session.id.clone();
-                            let cwd = session.project.clone();
+                            let cwd = session.last_cwd.clone()
+                                .unwrap_or_else(|| session.project.clone());
 
                             app.status_msg = Some("Resuming session...".into());
                             terminal.draw(|f| ui::draw(f, &app))?;
