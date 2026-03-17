@@ -370,62 +370,6 @@ fn extract_text_content(content: &serde_json::Value) -> String {
     }
 }
 
-/// Ensure a session can be resumed from a given directory by symlinking
-/// the session files into the corresponding project directory if needed.
-pub fn ensure_session_at(session_id: &str, target_dir: &str) {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return,
-    };
-    let projects_dir = home.join(".claude/projects");
-
-    // Convert target_dir to project dir name (/ -> -)
-    let proj_name = target_dir.replace('/', "-");
-    let target_proj = projects_dir.join(&proj_name);
-
-    let session_file = format!("{}.jsonl", session_id);
-
-    // Already exists in target?
-    if target_proj.join(&session_file).exists() {
-        return;
-    }
-
-    // Find the session file in any existing project dir
-    let source = if let Ok(entries) = fs::read_dir(&projects_dir) {
-        let mut found = None;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let candidate = path.join(&session_file);
-                if candidate.exists() {
-                    found = Some(candidate);
-                    break;
-                }
-            }
-        }
-        found
-    } else {
-        None
-    };
-
-    let source = match source {
-        Some(s) => s,
-        None => return,
-    };
-
-    // Create target project dir and symlink
-    let _ = fs::create_dir_all(&target_proj);
-    let target_path = target_proj.join(&session_file);
-    let _ = std::os::unix::fs::symlink(&source, &target_path);
-
-    // Also symlink the subagents/tool-results dir if it exists
-    let source_dir = source.with_extension("");
-    if source_dir.is_dir() {
-        let target_subdir = target_proj.join(format!("{}", session_id));
-        let _ = std::os::unix::fs::symlink(&source_dir, &target_subdir);
-    }
-}
-
 /// Build a map of session_id -> cwd from all PID files in ~/.claude/sessions/
 fn build_session_cwd_map() -> HashMap<String, String> {
     let mut map = HashMap::new();

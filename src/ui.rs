@@ -95,17 +95,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         View::NewSession | View::NewRemoteSession => draw_new_session(f, app, chunks[1]),
     }
 
-    let footer_text = if app.editing_path {
-        Line::from(vec![
-            Span::styled(" cd ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(&app.edit_path_buf),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
-            Span::styled("    enter", Style::default().fg(Color::Green)),
-            Span::raw(" resume  "),
-            Span::styled("esc", Style::default().fg(Color::Green)),
-            Span::raw(" cancel"),
-        ])
-    } else if let Some(ref msg) = app.status_msg {
+    let footer_text = if let Some(ref msg) = app.status_msg {
         Line::from(vec![
             Span::styled(" ● ", Style::default().fg(Color::Yellow)),
             Span::styled(msg.as_str(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -144,10 +134,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         ) {
             hints.push(Span::styled("l/h", Style::default().fg(Color::Green)));
             hints.push(Span::raw(" expand  "));
-        }
-        if matches!(app.view, View::FolderSessions | View::AllSessions) {
-            hints.push(Span::styled("c", Style::default().fg(Color::Green)));
-            hints.push(Span::raw("d  "));
         }
         hints.push(Span::styled("a", Style::default().fg(Color::Green)));
         hints.push(Span::raw("ll "));
@@ -231,7 +217,8 @@ pub fn wrap_text(text: &str, width: usize, indent: usize, style: Style) -> Vec<L
 /// Data needed to render one session row (local or remote).
 struct SessionRow<'a> {
     last_ts: u64,
-    cwd_display: String,
+    project_display: String,
+    cwd_display: Option<String>,
     active_marker: String,
     last_msg: &'a str,
     msg_count: usize,
@@ -260,7 +247,7 @@ fn draw_session_list<'a>(
                 Span::styled(format!(" ●{}", s.active_marker), Style::default().fg(Color::Green))
             };
 
-            let line1 = Line::from(vec![
+            let mut line1_spans = vec![
                 active_marker,
                 Span::styled(
                     format!(" {:>8}", time_ago),
@@ -268,14 +255,23 @@ fn draw_session_list<'a>(
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    s.cwd_display.clone(),
+                    s.project_display.clone(),
                     Style::default().fg(Color::Rgb(100, 160, 220)),
                 ),
-                Span::styled(
-                    format!("  {}m", s.msg_count),
-                    Style::default().fg(Color::Rgb(80, 80, 100)),
-                ),
-            ]);
+            ];
+            if let Some(ref cwd) = s.cwd_display {
+                if cwd != &s.project_display {
+                    line1_spans.push(Span::styled(
+                        format!("  cwd:{}", cwd),
+                        Style::default().fg(Color::Rgb(80, 120, 80)),
+                    ));
+                }
+            }
+            line1_spans.push(Span::styled(
+                format!("  {}m", s.msg_count),
+                Style::default().fg(Color::Rgb(80, 80, 100)),
+            ));
+            let line1 = Line::from(line1_spans);
 
             let msg_width = w.saturating_sub(5);
             let preview: String = s.last_msg.chars().take(msg_width).collect();
@@ -357,17 +353,15 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .iter()
         .map(|&idx| {
             let s = &app.sessions[idx];
-            let cwd_display = s
-                .last_cwd
-                .as_deref()
-                .map(short_project)
-                .unwrap_or_else(|| short_project(&s.project));
+            let project_display = short_project(&s.project);
+            let cwd_display = s.last_cwd.as_deref().map(short_project);
             let active_marker = match &s.active {
                 Some(info) => info.workspace.as_deref().unwrap_or("?").to_string(),
                 None => String::new(),
             };
             SessionRow {
                 last_ts: s.last_ts,
+                project_display,
                 cwd_display,
                 active_marker,
                 last_msg: &s.last_msg,
@@ -447,13 +441,15 @@ fn draw_remote_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .remote_sessions
         .iter()
         .map(|s| {
-            let cwd_display = s.last_cwd.as_deref().unwrap_or(&s.project).to_string();
+            let project_display = s.project.clone();
+            let cwd_display = s.last_cwd.clone();
             let active_marker = match s.active_pid {
                 Some(pid) => pid.to_string(),
                 None => String::new(),
             };
             SessionRow {
                 last_ts: s.last_ts,
+                project_display,
                 cwd_display,
                 active_marker,
                 last_msg: &s.last_msg,
