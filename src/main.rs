@@ -203,6 +203,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let cwd = app.edit_path_buf.clone();
                             app.editing_path = false;
 
+                            session::ensure_session_at(&sid, &cwd);
+
                             app.status_msg = Some("Resuming session...".into());
                             terminal.draw(|f| ui::draw(f, &app))?;
 
@@ -419,6 +421,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let sid = session.id.clone();
                             let cwd = session.last_cwd.clone()
                                 .unwrap_or_else(|| session.project.clone());
+
+                            session::ensure_session_at(&sid, &cwd);
 
                             app.status_msg = Some("Resuming session...".into());
                             terminal.draw(|f| ui::draw(f, &app))?;
