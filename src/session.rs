@@ -92,6 +92,8 @@ pub struct ActiveInfo {
     pub window_address: Option<String>,
     /// If this process was started with --resume <id>, the original session ID.
     pub resumed_from: Option<String>,
+    /// The cwd from the session PID file.
+    pub cwd: Option<String>,
 }
 
 pub struct Session {
@@ -157,13 +159,14 @@ fn read_resume_arg(pid: u32) -> Option<String> {
 }
 
 /// Get hyprland window info for active sessions.
-/// Returns map of session_id -> ActiveInfo with workspace and window address.
+/// Returns map of session_id -> ActiveInfo with workspace, window address, and cwd.
+/// Also reads cwd from PID files, eliminating the need for a separate build_session_cwd_map.
 pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
     let sessions_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".claude/sessions");
 
-    let mut session_pids: Vec<(String, u32)> = Vec::new();
+    let mut session_pids: Vec<(String, u32, Option<String>)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
@@ -187,9 +190,10 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
                 Some(s) => s.to_string(),
                 None => continue,
             };
+            let cwd = pid_file.get("cwd").and_then(|v| v.as_str()).map(|s| s.to_string());
             let is_running = unsafe { libc::kill(pid as i32, 0) == 0 };
             if is_running {
-                session_pids.push((session_id, pid));
+                session_pids.push((session_id, pid, cwd));
             }
         }
     }
@@ -206,7 +210,7 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
         .unwrap_or_default();
 
     let mut active = HashMap::new();
-    for (sid, claude_pid) in session_pids {
+    for (sid, claude_pid, cwd) in session_pids {
         let terminal_pid = find_terminal_pid(claude_pid);
         let resumed_from = read_resume_arg(claude_pid);
         let mut info = ActiveInfo {
@@ -214,6 +218,7 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
             workspace: None,
             window_address: None,
             resumed_from,
+            cwd,
         };
 
         if let Some(tpid) = terminal_pid {
@@ -233,7 +238,8 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
 }
 
 /// Returns (last_cwd, session_file_path) for each resumable session.
-pub fn find_resumable_sessions() -> HashMap<String, (Option<String>, PathBuf)> {
+/// When `skip_cwd` is true, doesn't read file contents (faster for listing).
+pub fn find_resumable_sessions(skip_cwd: bool) -> HashMap<String, (Option<String>, PathBuf)> {
     let projects_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".claude/projects");
@@ -261,7 +267,7 @@ pub fn find_resumable_sessions() -> HashMap<String, (Option<String>, PathBuf)> {
                     continue;
                 }
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let last_cwd = read_last_cwd(&path);
+                    let last_cwd = if skip_cwd { None } else { read_last_cwd(&path) };
                     resumable.insert(stem.to_string(), (last_cwd, path.clone()));
                 }
             }
@@ -272,8 +278,23 @@ pub fn find_resumable_sessions() -> HashMap<String, (Option<String>, PathBuf)> {
 }
 
 fn read_last_cwd(path: &std::path::Path) -> Option<String> {
-    let file = fs::read_to_string(path).ok()?;
-    for line in file.lines().rev() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+
+    // Read only the tail of the file — cwd entries are near the end.
+    // 8KB is plenty to find the last cwd entry in most session files.
+    let tail_size: u64 = 8192;
+    let start = file_len.saturating_sub(tail_size);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).ok()?;
+    }
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+
+    for line in buf.lines().rev() {
         if let Ok(entry) = serde_json::from_str::<SessionEntry>(line) {
             if let Some(cwd) = entry.cwd {
                 return Some(cwd);
@@ -370,31 +391,17 @@ fn extract_text_content(content: &serde_json::Value) -> String {
     }
 }
 
-/// Build a map of session_id -> cwd from all PID files in ~/.claude/sessions/
-fn build_session_cwd_map() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let sessions_dir = match dirs::home_dir() {
-        Some(h) => h.join(".claude/sessions"),
-        None => return map,
-    };
-    if let Ok(entries) = fs::read_dir(&sessions_dir) {
-        for entry in entries.flatten() {
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let (Some(sid), Some(cwd)) = (
-                        val.get("sessionId").and_then(|v| v.as_str()),
-                        val.get("cwd").and_then(|v| v.as_str()),
-                    ) {
-                        map.insert(sid.to_string(), cwd.to_string());
-                    }
-                }
-            }
-        }
-    }
-    map
+pub fn load_sessions() -> Vec<Session> {
+    load_sessions_inner(false)
 }
 
-pub fn load_sessions() -> Vec<Session> {
+/// Load sessions in lightweight mode — skips reading full conversation turns
+/// and skips reading cwd from session JSONL files. Much faster for `--json`.
+pub fn load_sessions_lightweight() -> Vec<Session> {
+    load_sessions_inner(true)
+}
+
+fn load_sessions_inner(lightweight: bool) -> Vec<Session> {
     let history_path = dirs::home_dir()
         .unwrap_or_default()
         .join(".claude/history.jsonl");
@@ -404,9 +411,8 @@ pub fn load_sessions() -> Vec<Session> {
         Err(_) => return vec![],
     };
 
-    let resumable = find_resumable_sessions();
+    let resumable = find_resumable_sessions(lightweight);
     let mut active = find_active_sessions();
-    let session_cwd_map = build_session_cwd_map();
 
     // Remap active sessions that were started with --resume <original-id>:
     // move their ActiveInfo to the original session ID so the original session
@@ -478,8 +484,10 @@ pub fn load_sessions() -> Vec<Session> {
         let last_ts = msgs.last().map(|(ts, _)| *ts).unwrap_or(0);
         let msg_count = msgs.len();
 
-        // Read full conversation turns from session file
-        let messages = if let Some((_cwd, path)) = resumable.get(&sid) {
+        // In lightweight mode, skip reading full turns (expensive I/O)
+        let messages = if lightweight {
+            vec![]
+        } else if let Some((_cwd, path)) = resumable.get(&sid) {
             read_session_turns(path)
         } else {
             // Fallback: user messages only from history
@@ -510,7 +518,7 @@ pub fn load_sessions() -> Vec<Session> {
         if !resumable.contains_key(&sid) {
             continue;
         }
-        let cwd = session_cwd_map.get(&sid).cloned();
+        let cwd = info.cwd.clone();
         let project = cwd.clone().unwrap_or_default();
         let display_msg = format!("(running in {})", short_project(&project));
         sessions.push(Session {
@@ -527,6 +535,41 @@ pub fn load_sessions() -> Vec<Session> {
     }
 
     sessions
+}
+
+/// Read turns for a single session by ID. Used for on-demand loading.
+pub fn load_session_turns(session_id: &str) -> Vec<Turn> {
+    let projects_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".claude/projects");
+
+    let entries = match fs::read_dir(&projects_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    for project_entry in entries.flatten() {
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let inner = match fs::read_dir(&project_path) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in inner.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem == session_id {
+                        return read_session_turns(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    vec![]
 }
 
 pub fn format_time_ago(ts_ms: u64) -> String {

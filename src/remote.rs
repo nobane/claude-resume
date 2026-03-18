@@ -4,6 +4,43 @@ use std::process::Command;
 use crate::config::HostConfig;
 use crate::session::Turn;
 
+/// Directory for SSH ControlMaster sockets
+fn ssh_control_dir() -> std::path::PathBuf {
+    let dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".cache/claude-resume/ssh");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Get the ControlPath for an SSH host.
+/// Uses SSH tokens so the master and client connections agree on the socket name.
+fn control_path() -> String {
+    let dir = ssh_control_dir();
+    format!("{}/%r@%h:%p", dir.display())
+}
+
+/// Common SSH args for connection multiplexing
+fn ssh_multiplex_args() -> Vec<String> {
+    let cp = control_path();
+    vec![
+        "-o".into(), format!("ControlPath={}", cp),
+        "-o".into(), "ControlMaster=auto".into(),
+        "-o".into(), "ControlPersist=60".into(),
+    ]
+}
+
+/// Build an SSH command with multiplexing enabled
+fn ssh_command(ssh_host: &str) -> Command {
+    let mut cmd = Command::new("ssh");
+    for arg in ssh_multiplex_args() {
+        cmd.arg(arg);
+    }
+    cmd.arg("-o").arg("ConnectTimeout=5");
+    cmd.arg(ssh_host);
+    cmd
+}
+
 #[derive(Deserialize)]
 struct RemoteSessionJson {
     id: String,
@@ -38,10 +75,7 @@ pub struct RemoteSession {
 }
 
 pub fn fetch_remote_sessions(host: &HostConfig) -> Result<Vec<RemoteSession>, String> {
-    let output = Command::new("ssh")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(&host.ssh)
+    let output = ssh_command(&host.ssh)
         .arg("~/.local/bin/claude-resume --json")
         .output()
         .map_err(|e| format!("SSH failed: {}", e))?;
@@ -75,10 +109,7 @@ pub fn fetch_remote_sessions(host: &HostConfig) -> Result<Vec<RemoteSession>, St
 
 /// Check if a PID is still running on the remote host
 pub fn is_remote_pid_alive(ssh_host: &str, pid: u32) -> bool {
-    Command::new("ssh")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(ssh_host)
+    ssh_command(ssh_host)
         .arg(format!("kill -0 {}", pid))
         .output()
         .map(|o| o.status.success())
@@ -86,8 +117,7 @@ pub fn is_remote_pid_alive(ssh_host: &str, pid: u32) -> bool {
 }
 
 pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
-    let output = Command::new("ssh")
-        .arg(ssh_host)
+    let output = ssh_command(ssh_host)
         .arg(format!("kill {}", pid))
         .output()
         .map_err(|e| format!("SSH kill failed: {}", e))?;
@@ -103,10 +133,7 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
 pub fn is_in_tmux_session(ssh_host: &str, session_id: &str) -> bool {
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
-    Command::new("ssh")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(ssh_host)
+    ssh_command(ssh_host)
         .arg(format!("/usr/bin/tmux has-session -t {}", shell_escape(&tmux_name)))
         .output()
         .map(|o| o.status.success())
@@ -125,19 +152,34 @@ pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str
         session_id,
     );
 
-    Command::new("ssh")
-        .arg("-t")
-        .arg(ssh_host)
-        .arg(&ssh_cmd)
-        .status()
-        .unwrap_or_else(|_| std::process::ExitStatus::default())
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-t");
+    for arg in ssh_multiplex_args() {
+        cmd.arg(arg);
+    }
+    cmd.arg(ssh_host);
+    cmd.arg(&ssh_cmd);
+    cmd.status().unwrap_or_else(|_| std::process::ExitStatus::default())
+}
+
+/// Fetch turns for a single remote session on-demand.
+pub fn fetch_remote_messages(ssh_host: &str, session_id: &str) -> Result<Vec<Turn>, String> {
+    let output = ssh_command(ssh_host)
+        .arg(format!("~/.local/bin/claude-resume --json-messages {}", shell_escape(session_id)))
+        .output()
+        .map_err(|e| format!("SSH failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("SSH error: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout).map_err(|e| format!("Parse error: {}", e))
 }
 
 pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>, String> {
-    let output = Command::new("ssh")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(ssh_host)
+    let output = ssh_command(ssh_host)
         .arg("~/.local/bin/claude-resume --list-dirs")
         .output()
         .map_err(|e| format!("SSH failed: {}", e))?;
@@ -193,12 +235,14 @@ pub fn open_new_remote_session(ssh_host: &str, dir: &str) -> std::process::ExitS
         shell_escape(dir),
     );
 
-    Command::new("ssh")
-        .arg("-t")
-        .arg(ssh_host)
-        .arg(&ssh_cmd)
-        .status()
-        .unwrap_or_else(|_| std::process::ExitStatus::default())
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-t");
+    for arg in ssh_multiplex_args() {
+        cmd.arg(arg);
+    }
+    cmd.arg(ssh_host);
+    cmd.arg(&ssh_cmd);
+    cmd.status().unwrap_or_else(|_| std::process::ExitStatus::default())
 }
 
 pub fn shell_escape(s: &str) -> String {

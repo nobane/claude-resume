@@ -84,9 +84,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // --json flag: dump session data as JSON for remote consumption
+    // --json-messages <session-id>: dump turns for a single session (on-demand loading)
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(pos) = args.iter().position(|a| a == "--json-messages") {
+            if let Some(session_id) = args.get(pos + 1) {
+                let turns = session::load_session_turns(session_id);
+                println!("{}", serde_json::to_string(&turns)?);
+                return Ok(());
+            } else {
+                eprintln!("--json-messages requires a session ID argument");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // --json flag: dump session data as JSON for remote consumption (lightweight — no messages)
     if std::env::args().any(|a| a == "--json") {
-        let sessions = session::load_sessions();
+        let sessions = session::load_sessions_lightweight();
         let json_sessions: Vec<JsonSession> = sessions
             .into_iter()
             .map(|s| JsonSession {
@@ -98,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_msg: s.last_msg,
                 last_cwd: s.last_cwd,
                 active_pid: s.active.map(|a| a.pid),
-                messages: s.messages,
+                messages: vec![],
             })
             .collect();
         let output = JsonOutput {
@@ -221,8 +236,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
                 KeyCode::Char('l') | KeyCode::Right => {
                     if app.view == View::RemoteSessions {
-                        if let Some(session) = app.selected_remote_session() {
-                            let max = session.messages.len().saturating_sub(1);
+                        if let Some(idx) = app.remote_session_state.selected() {
+                            // Lazy-load messages on first expand
+                            if app.remote_sessions[idx].messages.is_empty() {
+                                let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
+                                let session_id = app.remote_sessions[idx].id.clone();
+                                app.status_msg = Some("Loading messages...".into());
+                                terminal.draw(|f| ui::draw(f, &app))?;
+                                if let Ok(turns) = remote::fetch_remote_messages(&ssh_host, &session_id) {
+                                    app.remote_sessions[idx].messages = turns;
+                                }
+                                app.status_msg = None;
+                            }
+                            let max = app.remote_sessions[idx].messages.len().saturating_sub(1);
                             if app.expand_lines < max {
                                 app.expand_lines += 1;
                             }
