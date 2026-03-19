@@ -49,7 +49,44 @@ claude-resume
 | `Tab` | Cycle views |
 | `Esc` | Back / collapse |
 | `g/G` | Jump to top/bottom |
+| `t` | Toggle tmux mode (wrap new sessions in tmux) |
 | `q` | Quit |
+
+### tmux Support
+
+Sessions can run inside tmux for persistence — if your terminal closes, the session keeps running and can be reattached.
+
+**Local tmux mode**: Press `t` to toggle. When enabled, new sessions and resumes launch inside named tmux sessions (`claude-{id}`). Active tmux sessions show `●T` in the session list and can be reattached with Enter.
+
+**Auto-detection**: claude-resume automatically detects sessions already running inside tmux (regardless of the toggle) and reattaches with `tmux attach -d` when you press Enter.
+
+#### tmux Configuration
+
+Claude Code requires specific tmux settings to work properly. Without these, keybinds (especially Ctrl+Enter to submit) break and rendering is wrong.
+
+Create `~/.tmux.conf`:
+
+```
+set -g allow-passthrough on
+set -g default-terminal "tmux-256color"
+set -ag terminal-overrides ",foot:RGB"
+set -ag terminal-overrides ",xterm-256color:RGB"
+set -sg escape-time 0
+set -g mouse on
+set -g set-clipboard on
+set -g focus-events on
+set -g extended-keys on
+set -as terminal-features "xterm*:extkeys"
+set -g history-limit 250000
+```
+
+**Critical settings explained:**
+- `allow-passthrough on` — Claude Code uses passthrough escape sequences for its TUI
+- `escape-time 0` — default 500ms delay on Escape makes the TUI feel laggy
+- `extended-keys on` + `terminal-features extkeys` — required for Ctrl+Enter (submit) to pass through tmux to Claude Code
+- `set-clipboard on` — enables clipboard sharing via OSC 52
+
+**tmux version**: 3.2+ required for `extended-keys`, 3.3+ for `allow-passthrough`. Arch `tmux` package (3.6+) works. On Ubuntu/Debian you may need to build from git.
 
 ### Remote Sessions
 
@@ -72,31 +109,34 @@ Session data comes from:
 - `~/.claude/projects/<dir>/<id>.jsonl` — full conversation transcripts (user + assistant turns)
 - `~/.claude/sessions/*.json` — PID files for active sessions
 
-Active session detection uses `/proc/<pid>` to check liveness and read `--resume` arguments. On Wayland (Hyprland), active sessions show their workspace and can be focused directly.
+Active session detection uses `/proc/<pid>` to check liveness and read `--resume` arguments. Active sessions show their workspace number and can be focused directly.
 
 ## Features
 
 - [x] Browse and resume local sessions
 - [x] Full conversation history (user + assistant messages)
-- [x] Active session detection and window focus (Hyprland)
+- [x] Active session detection and window focus (Hyprland + i3)
 - [x] Project grouping and filtering
 - [x] Remote session browsing and resume over SSH
 - [x] Remote new session with directory picker
+- [x] Local tmux mode (persistent sessions that survive terminal close)
+- [x] Auto-detection of tmux sessions with reattach
 - [x] tmux session persistence for remote sessions
 - [x] Loading indicators for remote connections
 - [x] SSH error surfacing in TUI
 
-## Platform Support
+## Window Manager Support
 
-| Feature | Linux | macOS | Windows |
-|---------|-------|-------|---------|
-| Session browsing | Yes | Untested | Untested |
-| Active session detection | Yes (`/proc`) | Planned (`ps`) | Planned |
-| Window focus | Hyprland | No | No |
-| Remote SSH sessions | Yes | Should work | Needs SSH client |
-| tmux integration | Yes | Yes | WSL only |
+The window manager is auto-detected at runtime:
 
-Core session browsing likely works anywhere Rust and Claude Code run. Active session detection and window focus are Linux-specific today.
+| WM | Detection | Window Focus | Workspace Tracking | Notes |
+|----|-----------|-------------|-------------------|-------|
+| Hyprland | `HYPRLAND_INSTANCE_SIGNATURE` env | `hyprctl dispatch focuswindow` | Yes | Native JSON API |
+| i3 | `I3SOCK` env | `i3-msg [con_id=N] focus` | Yes | Uses `xdotool` for PID resolution |
+
+**i3 requirements**: `xdotool` must be installed (`sudo pacman -S xdotool` / `sudo apt install xdotool`). Used to resolve X11 window IDs to process PIDs. For multi-window terminals like WezTerm, `wezterm cli` is used for TTY-based disambiguation.
+
+Core session browsing works without any window manager. Active session detection requires Linux (`/proc`).
 
 ## Config
 

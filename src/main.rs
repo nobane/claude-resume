@@ -3,6 +3,7 @@ mod config;
 mod remote;
 mod session;
 mod ui;
+mod wm;
 
 use crossterm::{
     cursor,
@@ -27,6 +28,8 @@ struct JsonSession {
     last_msg: String,
     last_cwd: Option<String>,
     active_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_tmux: Option<bool>,
     messages: Vec<session::Turn>,
 }
 
@@ -35,15 +38,61 @@ struct JsonOutput {
     sessions: Vec<JsonSession>,
 }
 
-/// Focus an active session's terminal window via hyprctl
+/// Focus an active session's terminal window via the detected window manager.
 fn focus_active_session(session: &Session) {
     if let Some(ref info) = session.active {
-        if let Some(ref addr) = info.window_address {
-            let _ = Command::new("hyprctl")
-                .args(["dispatch", "focuswindow", &format!("address:{}", addr)])
-                .output();
+        if let Some(ref id) = info.window_address {
+            let detected_wm = wm::detect();
+            wm::focus_window(detected_wm, id);
         }
     }
+}
+
+/// Attach to a tmux session, detaching any other clients first.
+fn tmux_attach_detach(name: &str) -> std::process::ExitStatus {
+    Command::new("tmux")
+        .args(["attach-session", "-d", "-t", name])
+        .status()
+        .unwrap_or_else(|_| std::process::ExitStatus::default())
+}
+
+/// Resume a local session inside tmux. Tries to attach to existing tmux session,
+/// or creates a new one with --resume.
+fn tmux_resume_local(session_id: &str, project: &str) -> std::process::ExitStatus {
+    let tmux_name = session::tmux_session_name(session_id);
+
+    // Try attach first (session may already exist)
+    let attach = Command::new("tmux")
+        .args(["attach-session", "-t", &tmux_name])
+        .status();
+    if let Ok(s) = &attach {
+        if s.success() {
+            return *s;
+        }
+    }
+
+    // Create new tmux session with claude --resume
+    let cmd = format!(
+        "claude --dangerously-skip-permissions --resume {}",
+        session_id
+    );
+    Command::new("tmux")
+        .args(["new-session", "-s", &tmux_name, "-c", project, &cmd])
+        .status()
+        .unwrap_or_else(|_| std::process::ExitStatus::default())
+}
+
+/// Launch a new local session inside tmux.
+fn tmux_new_local(dir: &str) -> std::process::ExitStatus {
+    Command::new("tmux")
+        .args([
+            "new-session",
+            "-c",
+            dir,
+            "claude --dangerously-skip-permissions",
+        ])
+        .status()
+        .unwrap_or_else(|_| std::process::ExitStatus::default())
 }
 
 fn restore_terminal() {
@@ -104,16 +153,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sessions = session::load_sessions_lightweight();
         let json_sessions: Vec<JsonSession> = sessions
             .into_iter()
-            .map(|s| JsonSession {
-                id: s.id,
-                project: s.project,
-                last_ts: s.last_ts,
-                msg_count: s.msg_count,
-                first_msg: s.first_msg,
-                last_msg: s.last_msg,
-                last_cwd: s.last_cwd,
-                active_pid: s.active.map(|a| a.pid),
-                messages: vec![],
+            .map(|s| {
+                let (active_pid, in_tmux) = match s.active {
+                    Some(a) => (Some(a.pid), Some(a.in_tmux)),
+                    None => (None, None),
+                };
+                JsonSession {
+                    id: s.id,
+                    project: s.project,
+                    last_ts: s.last_ts,
+                    msg_count: s.msg_count,
+                    first_msg: s.first_msg,
+                    last_msg: s.last_msg,
+                    last_cwd: s.last_cwd,
+                    active_pid,
+                    in_tmux,
+                    messages: vec![],
+                }
             })
             .collect();
         let output = JsonOutput {
@@ -165,6 +221,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 terminal.draw(|f| ui::draw(f, &app))?;
                                 restore_terminal();
                                 let status = remote::open_new_remote_session(&ssh_host, &dir.path);
+                                std::process::exit(status.code().unwrap_or(0));
+                            } else if app.tmux_mode {
+                                // Local tmux: wrap in tmux session
+                                app.status_msg = Some("Starting tmux session...".into());
+                                terminal.draw(|f| ui::draw(f, &app))?;
+                                restore_terminal();
+                                let status = tmux_new_local(&dir.path);
                                 std::process::exit(status.code().unwrap_or(0));
                             } else {
                                 // Local: replace TUI process with claude
@@ -296,6 +359,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.enter_new_session();
                     }
                 }
+                KeyCode::Char('t') => {
+                    app.toggle_tmux_mode();
+                }
+                KeyCode::Char('s') => {
+                    // Steal: detach other clients and attach a local tmux session here
+                    if matches!(app.view, View::FolderSessions | View::AllSessions) {
+                        if let Some(session) = app.selected_session() {
+                            let is_tmux = session.active.as_ref().map_or(false, |a| a.in_tmux);
+                            if is_tmux {
+                                let sid = session.id.clone();
+                                let tmux_sess = session.active.as_ref()
+                                    .and_then(|a| a.tmux_session.clone())
+                                    .unwrap_or_else(|| session::tmux_session_name(&sid));
+                                app.status_msg = Some("Stealing tmux session...".into());
+                                terminal.draw(|f| ui::draw(f, &app))?;
+                                restore_terminal();
+                                let status = tmux_attach_detach(&tmux_sess);
+                                std::process::exit(status.code().unwrap_or(0));
+                            }
+                        }
+                    }
+                }
                 KeyCode::Char('a') => {
                     // Quick jump to All Sessions view
                     app.enter_all_sessions();
@@ -380,31 +465,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     View::FolderSessions | View::AllSessions => {
                         if let Some(session) = app.selected_session() {
-                            if session.active.is_some() {
+                            let sid = session.id.clone();
+                            let cwd = session.project.clone();
+                            let is_active = session.active.is_some();
+                            let session_in_tmux = session.active.as_ref().map_or(false, |a| a.in_tmux);
+                            let tmux_sess = session.active.as_ref().and_then(|a| a.tmux_session.clone());
+
+                            if is_active && session_in_tmux {
+                                // Session is in tmux — check if there's a local window to focus
+                                if session.active.as_ref().and_then(|a| a.window_address.as_ref()).is_some() {
+                                    // Tmux client is in a local terminal window — focus it
+                                    focus_active_session(session);
+                                    break;
+                                } else {
+                                    // No local window (SSH client or detached) — attach here
+                                    app.status_msg = Some("Attaching tmux...".into());
+                                    terminal.draw(|f| ui::draw(f, &app))?;
+                                    restore_terminal();
+                                    let tmux_name = tmux_sess.unwrap_or_else(|| session::tmux_session_name(&sid));
+                                    let status = tmux_attach_detach(&tmux_name);
+                                    std::process::exit(status.code().unwrap_or(0));
+                                }
+                            } else if is_active {
+                                // Not in tmux — focus window via WM
                                 focus_active_session(session);
                                 break;
                             }
 
-                            let sid = session.id.clone();
-                            let cwd = session.project.clone();
-
+                            // Inactive session — resume
                             app.status_msg = Some("Resuming session...".into());
                             terminal.draw(|f| ui::draw(f, &app))?;
-
                             restore_terminal();
 
-                            let status = Command::new("claude")
-                                .arg("--dangerously-skip-permissions")
-                                .arg("--resume")
-                                .arg(&sid)
-                                .current_dir(&cwd)
-                                .status();
+                            if app.tmux_mode {
+                                let status = tmux_resume_local(&sid, &cwd);
+                                std::process::exit(status.code().unwrap_or(0));
+                            } else {
+                                let status = Command::new("claude")
+                                    .arg("--dangerously-skip-permissions")
+                                    .arg("--resume")
+                                    .arg(&sid)
+                                    .current_dir(&cwd)
+                                    .status();
 
-                            match status {
-                                Ok(s) => std::process::exit(s.code().unwrap_or(0)),
-                                Err(e) => {
-                                    eprintln!("Failed to launch claude: {}", e);
-                                    std::process::exit(1);
+                                match status {
+                                    Ok(s) => std::process::exit(s.code().unwrap_or(0)),
+                                    Err(e) => {
+                                        eprintln!("Failed to launch claude: {}", e);
+                                        std::process::exit(1);
+                                    }
                                 }
                             }
                         }

@@ -46,6 +46,7 @@ pub struct App {
     pub recent_dirs: Vec<String>,
     pub prev_view: Option<Box<View>>,
     pub status_msg: Option<String>,
+    pub tmux_mode: bool,
 }
 
 impl App {
@@ -120,6 +121,7 @@ impl App {
             recent_dirs,
             prev_view: None,
             status_msg: None,
+            tmux_mode: false,
         }
     }
 
@@ -391,6 +393,10 @@ impl App {
         self.remote_session_state
             .selected()
             .and_then(|i| self.remote_sessions.get(i))
+    }
+
+    pub fn toggle_tmux_mode(&mut self) {
+        self.tmux_mode = !self.tmux_mode;
     }
 
     pub fn move_selection(&mut self, delta: i32) {

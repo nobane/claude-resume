@@ -72,6 +72,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         app.view == View::RemoteHosts || app.view == View::RemoteSessions,
     );
 
+    let tmux_indicator = if app.tmux_mode {
+        Span::styled(
+            " [tmux]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" [tmux]", Style::default().fg(Color::Rgb(60, 60, 70)))
+    };
+
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             " Claude Resume",
@@ -79,6 +90,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
+        tmux_indicator,
         Span::raw(" "),
         tab_all,
         tab_folders,
@@ -117,12 +129,27 @@ pub fn draw(f: &mut Frame, app: &App) {
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ])
     } else {
+        // Determine Enter action label based on selected session
+        let enter_label = match app.view {
+            View::Folders | View::RemoteHosts => " open  ",
+            View::FolderSessions | View::AllSessions => {
+                if let Some(session) = app.selected_session() {
+                    match &session.active {
+                        Some(info) if info.in_tmux && info.window_address.is_some() => " focus  ",
+                        Some(info) if info.in_tmux => " steal  ",
+                        Some(_) => " focus  ",
+                        None => " resume  ",
+                    }
+                } else {
+                    " resume  "
+                }
+            }
+            _ => " resume/focus  ",
+        };
+        let enter_color = if enter_label == " steal  " { Color::Yellow } else { Color::Green };
         let mut hints = vec![
-            Span::styled(" enter", Style::default().fg(Color::Green)),
-            Span::raw(match app.view {
-                View::Folders | View::RemoteHosts => " open  ",
-                _ => " resume/focus  ",
-            }),
+            Span::styled(" enter", Style::default().fg(enter_color)),
+            Span::raw(enter_label),
         ];
         if app.view == View::FolderSessions || app.view == View::RemoteSessions {
             hints.push(Span::styled("esc", Style::default().fg(Color::Green)));
@@ -143,6 +170,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         hints.push(Span::raw("emote  "));
         hints.push(Span::styled("n", Style::default().fg(Color::Green)));
         hints.push(Span::raw("ew  "));
+        hints.push(Span::styled("t", Style::default().fg(Color::Green)));
+        hints.push(Span::raw("mux  "));
+        // Show steal hint when selected session is an active tmux session
+        if matches!(app.view, View::FolderSessions | View::AllSessions) {
+            if let Some(session) = app.selected_session() {
+                if session.active.as_ref().map_or(false, |a| a.in_tmux) {
+                    hints.push(Span::styled("s", Style::default().fg(Color::Yellow)));
+                    hints.push(Span::raw("teal  "));
+                }
+            }
+        }
         if !matches!(app.view, View::RemoteHosts | View::RemoteSessions) {
             hints.push(Span::styled("/", Style::default().fg(Color::Green)));
             hints.push(Span::raw(" filter  "));
@@ -356,7 +394,16 @@ pub fn draw_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             let project_display = short_project(&s.project);
             let cwd_display = s.last_cwd.as_deref().map(short_project);
             let active_marker = match &s.active {
-                Some(info) => info.workspace.as_deref().unwrap_or("?").to_string(),
+                Some(info) => {
+                    let ws = info.workspace.as_deref().unwrap_or("");
+                    if info.in_tmux {
+                        if ws.is_empty() { "T".to_string() } else { format!("T{}", ws) }
+                    } else if ws.is_empty() {
+                        "?".to_string()
+                    } else {
+                        ws.to_string()
+                    }
+                }
                 None => String::new(),
             };
             SessionRow {
@@ -444,7 +491,7 @@ fn draw_remote_sessions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             let project_display = s.project.clone();
             let cwd_display = s.last_cwd.clone();
             let active_marker = match s.active_pid {
-                Some(pid) => pid.to_string(),
+                Some(_) => if s.in_tmux { "T".to_string() } else { "N".to_string() },
                 None => String::new(),
             };
             SessionRow {

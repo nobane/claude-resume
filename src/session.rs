@@ -16,19 +16,7 @@ struct HistoryEntry {
     session_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct HyprClient {
-    pid: i64,
-    workspace: HyprWorkspace,
-    address: String,
-}
-
-#[derive(Deserialize)]
-struct HyprWorkspace {
-    #[allow(dead_code)]
-    id: i64,
-    name: String,
-}
+use crate::wm;
 
 #[derive(Clone, Serialize)]
 pub struct Turn {
@@ -94,6 +82,10 @@ pub struct ActiveInfo {
     pub resumed_from: Option<String>,
     /// The cwd from the session PID file.
     pub cwd: Option<String>,
+    /// Whether this session is running inside tmux.
+    pub in_tmux: bool,
+    /// The tmux session name (if running inside tmux).
+    pub tmux_session: Option<String>,
 }
 
 pub struct Session {
@@ -119,7 +111,14 @@ struct SessionEntry {
     cwd: Option<String>,
 }
 
-/// Walk up the process tree from a PID to find the terminal (foot) PID.
+/// Known terminal emulator process names.
+const TERMINAL_NAMES: &[&str] = &[
+    "foot", "footclient", "alacritty", "kitty", "st",
+    "xterm", "urxvt", "gnome-terminal-", "terminator", "xfce4-terminal",
+    "konsole", "wezterm-gui", "tilix",
+];
+
+/// Walk up the process tree from a PID to find the terminal emulator PID.
 fn find_terminal_pid(mut pid: u32) -> Option<u32> {
     for _ in 0..20 {
         if pid <= 1 {
@@ -129,13 +128,75 @@ fn find_terminal_pid(mut pid: u32) -> Option<u32> {
         let comm_start = stat.find('(')?;
         let comm_end = stat.rfind(')')?;
         let comm = &stat[comm_start + 1..comm_end];
-        if comm == "foot" || comm == "footclient" {
+        if TERMINAL_NAMES.contains(&comm) {
             return Some(pid);
         }
         let rest = &stat[comm_end + 2..];
         let ppid: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
         pid = ppid;
     }
+    None
+}
+
+/// Find the terminal PID by reading a process's TTY and scanning /proc.
+/// Used when process tree walk fails (e.g. tmux client whose parent exited).
+///
+/// Strategy: read the target's tty_nr, scan /proc once to find a process on
+/// that same TTY whose parent is a known terminal emulator.
+fn find_terminal_pid_by_tty(pid: u32) -> Option<u32> {
+    // Get the tty_nr from the target process
+    let stat = fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let comm_end = stat.rfind(')')?;
+    let rest = &stat[comm_end + 2..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // Fields after comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
+    let tty_nr: u32 = fields.get(4)?.parse().ok()?;
+    if tty_nr == 0 {
+        return None;
+    }
+
+    // Single scan of /proc: for each process, check if it's on our TTY
+    // and its parent is a terminal emulator
+    let proc_entries = fs::read_dir("/proc").ok()?;
+    for entry in proc_entries.flatten() {
+        let name = entry.file_name();
+        let candidate_pid: u32 = match name.to_string_lossy().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let cstat = match fs::read_to_string(format!("/proc/{}/stat", candidate_pid)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let cend = match cstat.rfind(')') { Some(i) => i, None => continue };
+        let crest = &cstat[cend + 2..];
+        let cfields: Vec<&str> = crest.split_whitespace().collect();
+        let c_tty: u32 = match cfields.get(4) { Some(s) => s.parse().unwrap_or(0), None => continue };
+
+        if c_tty != tty_nr {
+            continue;
+        }
+
+        // This process is on the same TTY. Check if its parent is a terminal.
+        let c_ppid: u32 = match cfields.get(1) { Some(s) => s.parse().unwrap_or(0), None => continue };
+        if c_ppid <= 1 {
+            continue;
+        }
+
+        let parent_stat = match fs::read_to_string(format!("/proc/{}/stat", c_ppid)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let p_comm_start = match parent_stat.find('(') { Some(i) => i, None => continue };
+        let p_comm_end = match parent_stat.rfind(')') { Some(i) => i, None => continue };
+        let p_comm = &parent_stat[p_comm_start + 1..p_comm_end];
+
+        if TERMINAL_NAMES.contains(&p_comm) {
+            return Some(c_ppid);
+        }
+    }
+
     None
 }
 
@@ -155,6 +216,107 @@ fn read_resume_arg(pid: u32) -> Option<String> {
             found_resume = true;
         }
     }
+    None
+}
+
+/// Get the short tmux session name for a session ID.
+pub fn tmux_session_name(session_id: &str) -> String {
+    format!("claude-{}", &session_id[..session_id.len().min(8)])
+}
+
+/// Info about a process running inside tmux.
+struct TmuxPaneInfo {
+    tmux_session: String,
+    client_pid: Option<u32>,
+}
+
+/// Find which tmux session contains a given PID by scanning all panes.
+/// Uses the PID of claude's parent shell (since pane_pid is the shell, not claude itself).
+fn find_tmux_pane_for_pid(claude_pid: u32) -> Option<TmuxPaneInfo> {
+    // Get claude's parent PID (the shell inside tmux pane)
+    let stat = fs::read_to_string(format!("/proc/{}/stat", claude_pid)).ok()?;
+    let comm_end = stat.rfind(')')?;
+    let rest = &stat[comm_end + 2..];
+    let shell_pid: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+
+    // List all tmux panes with their PIDs and session names
+    let output = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"])
+        .output()
+        .ok()?;
+    let out = String::from_utf8_lossy(&output.stdout);
+
+    for line in out.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let pane_pid: u32 = parts.next()?.parse().ok()?;
+        let session_name = parts.next()?;
+        if pane_pid == shell_pid || pane_pid == claude_pid {
+            // Found the tmux session — now get its client
+            let client_output = Command::new("tmux")
+                .args(["list-clients", "-t", session_name, "-F", "#{client_pid}"])
+                .output()
+                .ok();
+            let client_pid = client_output.and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.trim().lines().next().and_then(|l| l.parse().ok())
+            });
+            return Some(TmuxPaneInfo {
+                tmux_session: session_name.to_string(),
+                client_pid,
+            });
+        }
+    }
+    None
+}
+
+
+/// For multi-window terminals (wezterm), match the correct window by TTY.
+/// Reads the process's TTY, queries `wezterm cli list --format json` to find
+/// which pane owns that TTY and its title, then matches against the WM window
+/// titles stored in WmWindow.
+fn disambiguate_by_tty<'a>(pid: u32, candidates: &[&'a wm::WmWindow]) -> Option<&'a wm::WmWindow> {
+    // Get the process's TTY
+    let tty_link = fs::read_link(format!("/proc/{}/fd/0", pid)).ok()?;
+    let tty = tty_link.to_string_lossy().to_string();
+
+    // Query wezterm for pane→TTY mapping
+    let output = Command::new("wezterm")
+        .args(["cli", "list", "--format", "json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct WezPane {
+        #[serde(default)]
+        tty_name: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+    }
+
+    let panes: Vec<WezPane> = serde_json::from_slice(&output.stdout).ok()?;
+    let pane = panes.iter().find(|p| p.tty_name.as_deref() == Some(&tty))?;
+    let wez_title = pane.title.as_deref().unwrap_or("");
+
+    // Strip leading Unicode spinner/status chars for comparison
+    let clean_title = wez_title.trim_start_matches(|c: char| !c.is_ascii_alphanumeric() && c != '~');
+
+    // Match against WmWindow titles (from i3 tree node names)
+    for candidate in candidates {
+        if let Some(ref win_title) = candidate.title {
+            let clean_win = win_title.trim_start_matches(|c: char| !c.is_ascii_alphanumeric() && c != '~');
+            if win_title == wez_title
+                || clean_win == clean_title
+                || (!clean_title.is_empty() && clean_win.contains(clean_title))
+                || (!clean_win.is_empty() && clean_title.contains(clean_win))
+            {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
 }
 
@@ -202,31 +364,68 @@ pub fn find_active_sessions() -> HashMap<String, ActiveInfo> {
         return HashMap::new();
     }
 
-    let hypr_clients: Vec<HyprClient> = Command::new("hyprctl")
-        .args(["clients", "-j"])
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
-        .unwrap_or_default();
+    let detected_wm = wm::detect();
+    let wm_windows = wm::list_windows(detected_wm);
 
     let mut active = HashMap::new();
     for (sid, claude_pid, cwd) in session_pids {
-        let terminal_pid = find_terminal_pid(claude_pid);
         let resumed_from = read_resume_arg(claude_pid);
+
+        // Try direct process tree walk first (non-tmux case)
+        let mut terminal_pid = find_terminal_pid(claude_pid);
+        let mut in_tmux = false;
+        let mut tmux_session_name = None;
+        // PID to use for TTY disambiguation (normally claude, but tmux client for tmux sessions)
+        let mut tty_disambiguation_pid = claude_pid;
+
+        // If direct walk failed, check if inside tmux
+        if terminal_pid.is_none() {
+            if let Some(tmux_info) = find_tmux_pane_for_pid(claude_pid) {
+                in_tmux = true;
+                tmux_session_name = Some(tmux_info.tmux_session);
+                // Walk up from tmux client to find the terminal window
+                if let Some(client_pid) = tmux_info.client_pid {
+                    // For disambiguation, use the client's TTY (not claude's tmux pane TTY)
+                    tty_disambiguation_pid = client_pid;
+                    terminal_pid = find_terminal_pid(client_pid)
+                        // Fallback: if parent chain is broken (reparented to init),
+                        // find the terminal by matching the client's TTY
+                        .or_else(|| find_terminal_pid_by_tty(client_pid));
+                }
+            }
+        }
+
         let mut info = ActiveInfo {
             pid: claude_pid,
             workspace: None,
             window_address: None,
             resumed_from,
             cwd,
+            in_tmux,
+            tmux_session: tmux_session_name,
         };
 
         if let Some(tpid) = terminal_pid {
-            for client in &hypr_clients {
-                if client.pid == tpid as i64 {
-                    info.workspace = Some(client.workspace.name.clone());
-                    info.window_address = Some(client.address.clone());
-                    break;
+            // Collect all windows matching this terminal PID
+            let matching: Vec<&wm::WmWindow> = wm_windows.iter()
+                .filter(|w| w.pid == tpid)
+                .collect();
+
+            if matching.len() == 1 {
+                // Simple case: one window per terminal process
+                info.workspace = Some(matching[0].workspace.clone());
+                info.window_address = Some(matching[0].id.clone());
+            } else if matching.len() > 1 {
+                // Multi-window terminal (e.g. wezterm server).
+                // Disambiguate by finding which window owns the session's TTY.
+                // For tmux sessions, uses the client's TTY (not claude's pane TTY).
+                if let Some(win) = disambiguate_by_tty(tty_disambiguation_pid, &matching) {
+                    info.workspace = Some(win.workspace.clone());
+                    info.window_address = Some(win.id.clone());
+                } else {
+                    // Fallback: use first match
+                    info.workspace = Some(matching[0].workspace.clone());
+                    info.window_address = Some(matching[0].id.clone());
                 }
             }
         }

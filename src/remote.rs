@@ -51,6 +51,8 @@ struct RemoteSessionJson {
     last_msg: String,
     last_cwd: Option<String>,
     active_pid: Option<u32>,
+    #[serde(default)]
+    in_tmux: Option<bool>,
     messages: Vec<Turn>,
 }
 
@@ -69,6 +71,7 @@ pub struct RemoteSession {
     pub last_msg: String,
     pub last_cwd: Option<String>,
     pub active_pid: Option<u32>,
+    pub in_tmux: bool,
     pub messages: Vec<Turn>,
     #[allow(dead_code)]
     pub host: String,
@@ -101,6 +104,7 @@ pub fn fetch_remote_sessions(host: &HostConfig) -> Result<Vec<RemoteSession>, St
             last_msg: s.last_msg,
             last_cwd: s.last_cwd,
             active_pid: s.active_pid,
+            in_tmux: s.in_tmux.unwrap_or(false),
             messages: s.messages,
             host: host.name.clone(),
         })
