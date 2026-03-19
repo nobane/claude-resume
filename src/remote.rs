@@ -30,13 +30,16 @@ fn ssh_multiplex_args() -> Vec<String> {
     ]
 }
 
-/// Build an SSH command with multiplexing enabled
-fn ssh_command(ssh_host: &str) -> Command {
+/// Build an SSH command with multiplexing and optional port
+fn ssh_command_with_port(ssh_host: &str, port: Option<u16>) -> Command {
     let mut cmd = Command::new("ssh");
     for arg in ssh_multiplex_args() {
         cmd.arg(arg);
     }
     cmd.arg("-o").arg("ConnectTimeout=5");
+    if let Some(p) = port {
+        cmd.arg("-p").arg(p.to_string());
+    }
     cmd.arg(ssh_host);
     cmd
 }
@@ -78,7 +81,7 @@ pub struct RemoteSession {
 }
 
 pub fn fetch_remote_sessions(host: &HostConfig) -> Result<Vec<RemoteSession>, String> {
-    let output = ssh_command(&host.ssh)
+    let output = ssh_command_with_port(&host.ssh, host.port)
         .arg("~/.local/bin/claude-resume --json")
         .output()
         .map_err(|e| format!("SSH failed: {}", e))?;
@@ -112,16 +115,16 @@ pub fn fetch_remote_sessions(host: &HostConfig) -> Result<Vec<RemoteSession>, St
 }
 
 /// Check if a PID is still running on the remote host
-pub fn is_remote_pid_alive(ssh_host: &str, pid: u32) -> bool {
-    ssh_command(ssh_host)
+pub fn is_remote_pid_alive(ssh_host: &str, port: Option<u16>, pid: u32) -> bool {
+    ssh_command_with_port(ssh_host, port)
         .arg(format!("kill -0 {}", pid))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
-    let output = ssh_command(ssh_host)
+pub fn kill_remote_pid(ssh_host: &str, port: Option<u16>, pid: u32) -> Result<(), String> {
+    let output = ssh_command_with_port(ssh_host, port)
         .arg(format!("kill {}", pid))
         .output()
         .map_err(|e| format!("SSH kill failed: {}", e))?;
@@ -134,10 +137,10 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
 }
 
 /// Kill a tmux session on the remote host.
-pub fn kill_remote_tmux(ssh_host: &str, session_id: &str) -> Result<(), String> {
+pub fn kill_remote_tmux(ssh_host: &str, port: Option<u16>, session_id: &str) -> Result<(), String> {
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
-    let output = ssh_command(ssh_host)
+    let output = ssh_command_with_port(ssh_host, port)
         .arg(format!("/usr/bin/tmux kill-session -t {}", shell_escape(&tmux_name)))
         .output()
         .map_err(|e| format!("SSH failed: {}", e))?;
@@ -149,17 +152,17 @@ pub fn kill_remote_tmux(ssh_host: &str, session_id: &str) -> Result<(), String> 
 }
 
 /// Check if a session's tmux session exists on the remote host.
-pub fn is_in_tmux_session(ssh_host: &str, session_id: &str) -> bool {
+pub fn is_in_tmux_session(ssh_host: &str, port: Option<u16>, session_id: &str) -> bool {
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
-    ssh_command(ssh_host)
+    ssh_command_with_port(ssh_host, port)
         .arg(format!("/usr/bin/tmux has-session -t {}", shell_escape(&tmux_name)))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str) -> std::process::ExitStatus {
+pub fn open_remote_session_by_id(ssh_host: &str, port: Option<u16>, session_id: &str, project: &str) -> std::process::ExitStatus {
     let short_id = &session_id[..8.min(session_id.len())];
     let tmux_name = format!("claude-{}", short_id);
 
@@ -176,14 +179,17 @@ pub fn open_remote_session_by_id(ssh_host: &str, session_id: &str, project: &str
     for arg in ssh_multiplex_args() {
         cmd.arg(arg);
     }
+    if let Some(p) = port {
+        cmd.arg("-p").arg(p.to_string());
+    }
     cmd.arg(ssh_host);
     cmd.arg(&ssh_cmd);
     cmd.status().unwrap_or_else(|_| std::process::ExitStatus::default())
 }
 
 /// Fetch turns for a single remote session on-demand.
-pub fn fetch_remote_messages(ssh_host: &str, session_id: &str) -> Result<Vec<Turn>, String> {
-    let output = ssh_command(ssh_host)
+pub fn fetch_remote_messages(ssh_host: &str, port: Option<u16>, session_id: &str) -> Result<Vec<Turn>, String> {
+    let output = ssh_command_with_port(ssh_host, port)
         .arg(format!("~/.local/bin/claude-resume --json-messages {}", shell_escape(session_id)))
         .output()
         .map_err(|e| format!("SSH failed: {}", e))?;
@@ -197,8 +203,8 @@ pub fn fetch_remote_messages(ssh_host: &str, session_id: &str) -> Result<Vec<Tur
     serde_json::from_str(&stdout).map_err(|e| format!("Parse error: {}", e))
 }
 
-pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>, String> {
-    let output = ssh_command(ssh_host)
+pub fn fetch_remote_dirs(ssh_host: &str, port: Option<u16>) -> Result<Vec<crate::session::DirEntry>, String> {
+    let output = ssh_command_with_port(ssh_host, port)
         .arg("~/.local/bin/claude-resume --list-dirs")
         .output()
         .map_err(|e| format!("SSH failed: {}", e))?;
@@ -248,7 +254,7 @@ pub fn fetch_remote_dirs(ssh_host: &str) -> Result<Vec<crate::session::DirEntry>
         .collect())
 }
 
-pub fn open_new_remote_session(ssh_host: &str, dir: &str) -> std::process::ExitStatus {
+pub fn open_new_remote_session(ssh_host: &str, port: Option<u16>, dir: &str) -> std::process::ExitStatus {
     let ssh_cmd = format!(
         "export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 && /usr/bin/tmux new-session -c {} \"$HOME/.local/bin/claude --dangerously-skip-permissions\"",
         shell_escape(dir),
@@ -258,6 +264,9 @@ pub fn open_new_remote_session(ssh_host: &str, dir: &str) -> std::process::ExitS
     cmd.arg("-t");
     for arg in ssh_multiplex_args() {
         cmd.arg(arg);
+    }
+    if let Some(p) = port {
+        cmd.arg("-p").arg(p.to_string());
     }
     cmd.arg(ssh_host);
     cmd.arg(&ssh_cmd);

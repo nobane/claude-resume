@@ -157,10 +157,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         if matches!(
             app.view,
-            View::FolderSessions | View::AllSessions | View::RemoteSessions
+            View::Folders | View::FolderSessions | View::AllSessions | View::RemoteSessions
         ) {
             hints.push(Span::styled("l/h", Style::default().fg(Color::Green)));
-            hints.push(Span::raw(" expand  "));
+            hints.push(Span::raw(if app.view == View::Folders { " preview  " } else { " expand  " }));
         }
         hints.push(Span::styled("a", Style::default().fg(Color::Green)));
         hints.push(Span::raw("ll "));
@@ -208,15 +208,19 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 pub fn draw_folders(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let selected_idx = app.folder_state.selected();
+    let w = area.width as usize;
+
     let items: Vec<ListItem> = app
         .folder_filtered
         .iter()
-        .map(|&idx| {
+        .enumerate()
+        .map(|(list_pos, &idx)| {
             let p = &app.projects[idx];
             let time_ago = format_time_ago(p.last_ts);
             let path = short_project(&p.path);
 
-            ListItem::new(Line::from(vec![
+            let folder_line = Line::from(vec![
                 Span::styled(
                     format!("{:>8} ", time_ago),
                     Style::default().fg(Color::DarkGray),
@@ -230,7 +234,83 @@ pub fn draw_folders(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     format!("{} sessions", p.session_count),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]))
+            ]);
+
+            let is_selected = selected_idx == Some(list_pos);
+            if is_selected && app.expand_lines > 0 {
+                let mut lines = vec![folder_line];
+
+                // Get sessions for this folder, sorted by timestamp desc
+                let mut folder_sessions: Vec<&crate::session::Session> = app.sessions.iter()
+                    .filter(|s| s.project == p.path)
+                    .collect();
+                folder_sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+
+                let show = app.expand_lines.min(folder_sessions.len());
+                let preview_sel = app.folder_preview_sel;
+                for (si, s) in folder_sessions.iter().take(show).enumerate() {
+                    let is_preview_selected = preview_sel == Some(si);
+                    let s_time = format_time_ago(s.last_ts);
+                    let active = if s.active.is_some() {
+                        Span::styled(" ● ", Style::default().fg(Color::Green))
+                    } else {
+                        Span::styled("   ", Style::default())
+                    };
+                    let sel_marker = if is_preview_selected { "  ▹ " } else { "    " };
+                    let header_bg = if is_preview_selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::Rgb(80, 80, 100))
+                    };
+
+                    // Session header line
+                    lines.push(Line::from(vec![
+                        Span::styled(sel_marker, Style::default().fg(Color::Cyan)),
+                        active,
+                        Span::styled(format!("{:>8}", s_time), header_bg),
+                        Span::styled(format!("  {}m  ", s.msg_count), header_bg),
+                    ]));
+
+                    // Messages to show: last 2 by default + extra from spacebar expand
+                    let msg_width = w.saturating_sub(10);
+                    let extra = if is_preview_selected { app.folder_preview_expand } else { 0 };
+                    let default_show = 2;
+                    let total_show = (default_show + extra).min(s.messages.len());
+
+                    if total_show > 0 && !s.messages.is_empty() {
+                        let start = s.messages.len().saturating_sub(total_show);
+                        for turn in s.messages[start..].iter() {
+                            let is_asst = turn.role == "assistant";
+                            let prefix = if is_asst { "      ▸ " } else { "      » " };
+                            let color = if is_asst {
+                                Color::Rgb(140, 140, 160)
+                            } else {
+                                Color::Rgb(170, 170, 185)
+                            };
+                            let prefix_color = if is_asst {
+                                Color::Rgb(180, 130, 255)
+                            } else {
+                                Color::Rgb(100, 180, 100)
+                            };
+                            let text: String = turn.text.chars().take(msg_width).collect();
+                            lines.push(Line::from(vec![
+                                Span::styled(prefix, Style::default().fg(prefix_color)),
+                                Span::styled(text, Style::default().fg(color)),
+                            ]));
+                        }
+                    } else if !s.last_msg.is_empty() {
+                        let text: String = s.last_msg.chars().take(msg_width).collect();
+                        lines.push(Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled(text, Style::default().fg(Color::Rgb(170, 170, 185))),
+                        ]));
+                    }
+                }
+                lines.push(Line::raw(""));
+                ListItem::new(lines)
+            } else {
+                ListItem::new(folder_line)
+            }
         })
         .collect();
 
@@ -325,19 +405,47 @@ fn draw_session_list<'a>(
             ));
             let line1 = Line::from(line1_spans);
 
+            // Default preview: show last 2 messages (user + assistant) from conversation
             let msg_width = w.saturating_sub(5);
-            let preview: String = s.last_msg.chars().take(msg_width).collect();
-            let line2 = Line::from(vec![
-                Span::raw("     "),
-                Span::styled(preview, Style::default().fg(Color::Rgb(180, 180, 190))),
-            ]);
+            let default_preview_count = if s.messages.len() >= 2 { 2 } else { 0 };
+            let preview_lines: Vec<Line> = if default_preview_count > 0 {
+                // Show last N messages (most recent at bottom)
+                let start = s.messages.len() - default_preview_count;
+                s.messages[start..].iter().map(|turn| {
+                    let is_assistant = turn.role == "assistant";
+                    let role_label = if is_assistant { "  ▸ " } else { "  » " };
+                    let role_color = if is_assistant {
+                        Color::Rgb(180, 130, 255)
+                    } else {
+                        Color::Rgb(100, 180, 100)
+                    };
+                    let text_color = if is_assistant {
+                        Color::Rgb(140, 140, 160)
+                    } else {
+                        Color::Rgb(170, 170, 185)
+                    };
+                    let text: String = turn.text.chars().take(msg_width.saturating_sub(4)).collect();
+                    Line::from(vec![
+                        Span::styled(role_label, Style::default().fg(role_color)),
+                        Span::styled(text, Style::default().fg(text_color)),
+                    ])
+                }).collect()
+            } else {
+                // Fallback: use last_msg from history
+                let preview: String = s.last_msg.chars().take(msg_width).collect();
+                vec![Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(preview, Style::default().fg(Color::Rgb(180, 180, 190))),
+                ])]
+            };
 
             let is_selected = selected_idx == Some(list_pos);
             if is_selected && expand_lines > 0 {
-                let mut lines = vec![line1, line2];
+                let mut lines = vec![line1];
+                lines.extend(preview_lines);
 
                 let msg_count = s.messages.len();
-                let skip = if msg_count > 1 { 1 } else { 0 };
+                let skip = default_preview_count.max(1);
                 let available = msg_count.saturating_sub(skip);
                 let show = expand_lines.min(available);
                 let start = msg_count.saturating_sub(skip + show);
@@ -386,7 +494,10 @@ fn draw_session_list<'a>(
                 lines.push(Line::raw(""));
                 ListItem::new(lines)
             } else {
-                ListItem::new(vec![line1, line2, Line::raw("")])
+                let mut lines = vec![line1];
+                lines.extend(preview_lines);
+                lines.push(Line::raw(""));
+                ListItem::new(lines)
             }
         })
         .collect();

@@ -227,9 +227,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let session_id = session.id.clone();
                                     let in_tmux = session.in_tmux;
                                     if in_tmux {
-                                        let _ = remote::kill_remote_tmux(&ssh_host, &session_id);
+                                        let _ = remote::kill_remote_tmux(&ssh_host, app.remote_selected_port, &session_id);
                                     }
-                                    let _ = remote::kill_remote_pid(&ssh_host, pid);
+                                    let _ = remote::kill_remote_pid(&ssh_host, app.remote_selected_port, pid);
                                     true
                                 } else { false }
                             } else { false }
@@ -269,7 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.status_msg = Some(format!("Connecting to {}...", host_name));
                                 terminal.draw(|f| ui::draw(f, &app))?;
                                 restore_terminal();
-                                let status = remote::open_new_remote_session(&ssh_host, &dir.path);
+                                let status = remote::open_new_remote_session(&ssh_host, app.remote_selected_port, &dir.path);
                                 std::process::exit(status.code().unwrap_or(0));
                             } else if app.tmux_mode {
                                 // Local tmux: wrap in tmux session
@@ -355,7 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let session_id = app.remote_sessions[idx].id.clone();
                                 app.status_msg = Some("Loading messages...".into());
                                 terminal.draw(|f| ui::draw(f, &app))?;
-                                if let Ok(turns) = remote::fetch_remote_messages(&ssh_host, &session_id) {
+                                if let Ok(turns) = remote::fetch_remote_messages(&ssh_host, app.remote_selected_port, &session_id) {
                                     app.remote_sessions[idx].messages = turns;
                                 }
                                 app.status_msg = None;
@@ -365,7 +365,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.expand_lines += 1;
                             }
                         }
-                    } else if app.view != View::Folders && app.view != View::RemoteHosts {
+                    } else if app.view == View::Folders {
+                        // Expand session previews under selected folder and advance selection
+                        if let Some(sel) = app.folder_state.selected() {
+                            if let Some(&proj_idx) = app.folder_filtered.get(sel) {
+                                let count = app.sessions.iter()
+                                    .filter(|s| s.project == app.projects[proj_idx].path)
+                                    .count();
+                                if app.expand_lines < count {
+                                    app.expand_lines += 1;
+                                }
+                                // Select the latest expanded session
+                                app.folder_preview_sel = Some(app.expand_lines.saturating_sub(1));
+                                app.folder_preview_expand = 0;
+                            }
+                        }
+                    } else if app.view != View::RemoteHosts {
                         if let Some(session) = app.selected_session() {
                             let max = session.messages.len().saturating_sub(1);
                             if app.expand_lines < max {
@@ -375,8 +390,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 KeyCode::Char('h') | KeyCode::Left => {
-                    if app.expand_lines > 0 {
+                    if app.view == View::Folders && app.expand_lines > 0 {
+                        if let Some(sel) = app.folder_preview_sel {
+                            if sel > 0 {
+                                // Move selection up one, collapse the last preview
+                                app.folder_preview_sel = Some(sel - 1);
+                                app.expand_lines = app.expand_lines.saturating_sub(1);
+                                app.folder_preview_expand = 0;
+                            } else {
+                                // At first session, collapse all
+                                app.expand_lines = 0;
+                                app.folder_preview_sel = None;
+                                app.folder_preview_expand = 0;
+                            }
+                        } else {
+                            app.expand_lines = 0;
+                        }
+                    } else if app.expand_lines > 0 {
                         app.expand_lines = app.expand_lines.saturating_sub(1);
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    // Spacebar: expand more conversation lines for selected folder preview
+                    if app.view == View::Folders {
+                        if let Some(session) = app.selected_folder_preview_session() {
+                            let max = session.messages.len().saturating_sub(2); // 2 already shown
+                            if app.folder_preview_expand < max {
+                                app.folder_preview_expand += 2;
+                            }
+                        }
                     }
                 }
                 KeyCode::Char('G') => app.jump_bottom(),
@@ -488,7 +530,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 KeyCode::Enter => match app.view {
-                    View::Folders => app.enter_folder(),
+                    View::Folders => {
+                        if let Some(session) = app.selected_folder_preview_session() {
+                            // A preview session is selected — resume/focus it
+                            let sid = session.id.clone();
+                            let cwd = session.project.clone();
+                            let is_active = session.active.is_some();
+                            let session_in_tmux = session.active.as_ref().map_or(false, |a| a.in_tmux);
+                            let tmux_sess = session.active.as_ref().and_then(|a| a.tmux_session.clone());
+                            let has_window = session.active.as_ref().and_then(|a| a.window_address.as_ref()).is_some();
+
+                            if is_active && session_in_tmux {
+                                if has_window {
+                                    focus_active_session(session);
+                                    break;
+                                } else {
+                                    app.status_msg = Some("Attaching tmux...".into());
+                                    terminal.draw(|f| ui::draw(f, &app))?;
+                                    restore_terminal();
+                                    let tmux_name = tmux_sess.unwrap_or_else(|| session::tmux_session_name(&sid));
+                                    let status = tmux_attach_detach(&tmux_name);
+                                    std::process::exit(status.code().unwrap_or(0));
+                                }
+                            } else if is_active {
+                                focus_active_session(session);
+                                break;
+                            }
+
+                            app.status_msg = Some("Resuming session...".into());
+                            terminal.draw(|f| ui::draw(f, &app))?;
+                            restore_terminal();
+                            if app.tmux_mode {
+                                let status = tmux_resume_local(&sid, &cwd);
+                                std::process::exit(status.code().unwrap_or(0));
+                            } else {
+                                let status = Command::new("claude")
+                                    .arg("--dangerously-skip-permissions")
+                                    .arg("--resume")
+                                    .arg(&sid)
+                                    .current_dir(&cwd)
+                                    .status();
+                                match status {
+                                    Ok(s) => std::process::exit(s.code().unwrap_or(0)),
+                                    Err(e) => {
+                                        eprintln!("Failed to launch claude: {}", e);
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
+                        } else {
+                            app.enter_folder();
+                        }
+                    }
                     View::RemoteHosts => {
                         if let Some(host) = app.start_remote_host_load() {
                             terminal.draw(|f| ui::draw(f, &app))?;
@@ -508,13 +601,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(pid) = active_pid {
                                 // Check if it's running inside a tmux session — if so,
                                 // just attach instead of killing. Only kill if not in tmux.
-                                let in_tmux = remote::is_in_tmux_session(&ssh_host, &session_id);
+                                let in_tmux = remote::is_in_tmux_session(&ssh_host, app.remote_selected_port, &session_id);
                                 if !in_tmux {
                                     app.status_msg = Some(format!("Killing PID {} on {}...", pid, host_name));
                                     terminal.draw(|f| ui::draw(f, &app))?;
 
-                                    if remote::is_remote_pid_alive(&ssh_host, pid) {
-                                        let _ = remote::kill_remote_pid(&ssh_host, pid);
+                                    if remote::is_remote_pid_alive(&ssh_host, app.remote_selected_port, pid) {
+                                        let _ = remote::kill_remote_pid(&ssh_host, app.remote_selected_port, pid);
                                         std::thread::sleep(std::time::Duration::from_millis(500));
                                     }
                                 }
@@ -524,7 +617,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             terminal.draw(|f| ui::draw(f, &app))?;
 
                             restore_terminal();
-                            let status = remote::open_remote_session_by_id(&ssh_host, &session_id, &project);
+                            let status = remote::open_remote_session_by_id(&ssh_host, app.remote_selected_port, &session_id, &project);
                             std::process::exit(status.code().unwrap_or(0));
                         }
                     }

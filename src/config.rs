@@ -6,6 +6,8 @@ pub struct HostConfig {
     pub ssh: String,
     #[serde(default)]
     pub gpu: bool,
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +98,28 @@ ssh = "admin@10.0.0.1"
         assert_eq!(hosts[0].ssh, "user@server1.example.com");
         assert_eq!(hosts[1].name, "server2");
         assert_eq!(hosts[1].ssh, "admin@10.0.0.1");
+    }
+
+    #[test]
+    fn test_parse_hosts_toml_with_port() {
+        let toml = r#"
+[[host]]
+name = "testhost"
+ssh = "g@localhost"
+port = 2222
+
+[[host]]
+name = "beau"
+ssh = "beau"
+gpu = true
+"#;
+        let hosts = parse_hosts_toml(toml);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].name, "testhost");
+        assert_eq!(hosts[0].port, Some(2222));
+        assert_eq!(hosts[1].name, "beau");
+        assert_eq!(hosts[1].port, None);
+        assert!(hosts[1].gpu);
     }
 
     #[test]

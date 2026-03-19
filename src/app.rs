@@ -35,6 +35,7 @@ pub struct App {
     pub remote_session_state: ListState,
     pub remote_selected_host: Option<String>,
     pub remote_selected_host_name: Option<String>,
+    pub remote_selected_port: Option<u16>,
     pub remote_gpu: bool,
     pub remote_error: Option<String>,
     pub remote_loading: bool,
@@ -48,6 +49,10 @@ pub struct App {
     pub status_msg: Option<String>,
     pub tmux_mode: bool,
     pub confirm_kill: bool,
+    /// Which previewed session is selected in folder view (0 = most recent)
+    pub folder_preview_sel: Option<usize>,
+    /// How many extra conversation lines to show for the selected folder preview session
+    pub folder_preview_expand: usize,
 }
 
 impl App {
@@ -112,6 +117,7 @@ impl App {
             remote_session_state: ListState::default(),
             remote_selected_host: None,
             remote_selected_host_name: None,
+            remote_selected_port: None,
             remote_gpu: false,
             remote_error: None,
             remote_loading: false,
@@ -124,6 +130,8 @@ impl App {
             status_msg: None,
             tmux_mode: false,
             confirm_kill: false,
+            folder_preview_sel: None,
+            folder_preview_expand: 0,
         }
     }
 
@@ -280,7 +288,7 @@ impl App {
             Some(h) => h.clone(),
             None => return,
         };
-        match remote::fetch_remote_dirs(&ssh_host) {
+        match remote::fetch_remote_dirs(&ssh_host, self.remote_selected_port) {
             Ok(dirs) => {
                 self.dir_list = dirs;
                 // Re-score with local recent_dirs knowledge
@@ -360,6 +368,7 @@ impl App {
         self.remote_loading = true;
         self.remote_selected_host = Some(host.ssh.clone());
         self.remote_selected_host_name = Some(host.name.clone());
+        self.remote_selected_port = host.port;
         self.remote_gpu = host.gpu;
         self.status_msg = Some(format!("Connecting to {}...", host.name));
         Some(host)
@@ -397,6 +406,18 @@ impl App {
             .and_then(|i| self.remote_sessions.get(i))
     }
 
+    /// Get the session selected in folder preview mode, if any.
+    pub fn selected_folder_preview_session(&self) -> Option<&Session> {
+        let sel = self.folder_preview_sel?;
+        let folder_idx = *self.folder_filtered.get(self.folder_state.selected()?)?;
+        let project_path = &self.projects[folder_idx].path;
+        let mut folder_sessions: Vec<&Session> = self.sessions.iter()
+            .filter(|s| s.project == *project_path)
+            .collect();
+        folder_sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+        folder_sessions.get(sel).copied()
+    }
+
     pub fn toggle_tmux_mode(&mut self) {
         self.tmux_mode = !self.tmux_mode;
     }
@@ -411,12 +432,16 @@ impl App {
         let next = (current + delta).clamp(0, len - 1) as usize;
         state.select(Some(next));
         self.expand_lines = 0;
+        self.folder_preview_sel = None;
+        self.folder_preview_expand = 0;
     }
 
     pub fn jump_top(&mut self) {
         if self.current_list_len() > 0 {
             self.current_list_state_mut().select(Some(0));
             self.expand_lines = 0;
+            self.folder_preview_sel = None;
+            self.folder_preview_expand = 0;
         }
     }
 
@@ -425,6 +450,8 @@ impl App {
         if len > 0 {
             self.current_list_state_mut().select(Some(len - 1));
             self.expand_lines = 0;
+            self.folder_preview_sel = None;
+            self.folder_preview_expand = 0;
         }
     }
 }
