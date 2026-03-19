@@ -14,6 +14,7 @@ use crossterm::{
 use ratatui::Terminal;
 use serde::Serialize;
 use std::{io::stdout, process::Command};
+extern crate libc;
 
 use app::View;
 use session::Session;
@@ -196,6 +197,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui::draw(f, &app))?;
 
         if let Event::Key(key) = event::read()? {
+            // Kill confirmation mode — y to confirm, anything else cancels
+            if app.confirm_kill {
+                app.confirm_kill = false;
+                if key.code == KeyCode::Char('y') {
+                    let killed = match app.view {
+                        View::FolderSessions | View::AllSessions => {
+                            if let Some(session) = app.selected_session() {
+                                if let Some(ref info) = session.active {
+                                    let in_tmux = info.in_tmux;
+                                    let tmux_sess = info.tmux_session.clone();
+                                    let pid = info.pid;
+                                    if in_tmux {
+                                        if let Some(ts) = tmux_sess {
+                                            let _ = Command::new("tmux")
+                                                .args(["kill-session", "-t", &ts])
+                                                .status();
+                                        }
+                                    }
+                                    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                                    true
+                                } else { false }
+                            } else { false }
+                        }
+                        View::RemoteSessions => {
+                            if let Some(session) = app.selected_remote_session() {
+                                if let Some(pid) = session.active_pid {
+                                    let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
+                                    let session_id = session.id.clone();
+                                    let in_tmux = session.in_tmux;
+                                    if in_tmux {
+                                        let _ = remote::kill_remote_tmux(&ssh_host, &session_id);
+                                    }
+                                    let _ = remote::kill_remote_pid(&ssh_host, pid);
+                                    true
+                                } else { false }
+                            } else { false }
+                        }
+                        _ => false,
+                    };
+                    if killed {
+                        app.status_msg = Some("Killed.".into());
+                    }
+                } else {
+                    app.status_msg = None;
+                }
+                continue;
+            }
+
             // NewSession / NewRemoteSession views handle ALL input themselves
             if matches!(app.view, View::NewSession | View::NewRemoteSession) {
                 match key.code {
@@ -357,6 +406,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.enter_new_remote_session();
                     } else {
                         app.enter_new_session();
+                    }
+                }
+                KeyCode::Char('K') => {
+                    // Kill: ask for confirmation before killing selected session
+                    let has_active = match app.view {
+                        View::FolderSessions | View::AllSessions => {
+                            app.selected_session().map_or(false, |s| s.active.is_some())
+                        }
+                        View::RemoteSessions => {
+                            app.selected_remote_session().map_or(false, |s| s.active_pid.is_some())
+                        }
+                        _ => false,
+                    };
+                    if has_active {
+                        app.confirm_kill = true;
+                        app.status_msg = Some("Kill this session? (y/n)".into());
                     }
                 }
                 KeyCode::Char('t') => {

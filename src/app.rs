@@ -47,6 +47,7 @@ pub struct App {
     pub prev_view: Option<Box<View>>,
     pub status_msg: Option<String>,
     pub tmux_mode: bool,
+    pub confirm_kill: bool,
 }
 
 impl App {
@@ -122,6 +123,7 @@ impl App {
             prev_view: None,
             status_msg: None,
             tmux_mode: false,
+            confirm_kill: false,
         }
     }
 

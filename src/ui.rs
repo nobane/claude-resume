@@ -181,6 +181,20 @@ pub fn draw(f: &mut Frame, app: &App) {
                 }
             }
         }
+        // Show kill hint when selected session is active
+        let show_kill = match app.view {
+            View::FolderSessions | View::AllSessions => {
+                app.selected_session().map_or(false, |s| s.active.is_some())
+            }
+            View::RemoteSessions => {
+                app.selected_remote_session().map_or(false, |s| s.active_pid.is_some())
+            }
+            _ => false,
+        };
+        if show_kill {
+            hints.push(Span::styled("K", Style::default().fg(Color::Red)));
+            hints.push(Span::raw("ill  "));
+        }
         if !matches!(app.view, View::RemoteHosts | View::RemoteSessions) {
             hints.push(Span::styled("/", Style::default().fg(Color::Green)));
             hints.push(Span::raw(" filter  "));

@@ -133,6 +133,21 @@ pub fn kill_remote_pid(ssh_host: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Kill a tmux session on the remote host.
+pub fn kill_remote_tmux(ssh_host: &str, session_id: &str) -> Result<(), String> {
+    let short_id = &session_id[..8.min(session_id.len())];
+    let tmux_name = format!("claude-{}", short_id);
+    let output = ssh_command(ssh_host)
+        .arg(format!("/usr/bin/tmux kill-session -t {}", shell_escape(&tmux_name)))
+        .output()
+        .map_err(|e| format!("SSH failed: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("tmux kill error: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
 /// Check if a session's tmux session exists on the remote host.
 pub fn is_in_tmux_session(ssh_host: &str, session_id: &str) -> bool {
     let short_id = &session_id[..8.min(session_id.len())];
