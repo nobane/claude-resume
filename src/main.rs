@@ -203,10 +203,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
+    let mut last_refresh = std::time::Instant::now();
+    let refresh_interval = std::time::Duration::from_secs(5);
+
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
-        if let Event::Key(key) = event::read()? {
+        // Poll with timeout for periodic refresh
+        if !event::poll(std::time::Duration::from_secs(1))? {
+            // No input — check if it's time to refresh
+            if last_refresh.elapsed() >= refresh_interval {
+                app.refresh();
+                last_refresh = std::time::Instant::now();
+            }
+            continue;
+        }
+
+        let ev = event::read()?;
+        let key = match ev {
+            Event::Key(k) => k,
+            _ => continue,
+        };
+
+        {
             // Kill confirmation mode — y to confirm, anything else cancels
             if app.confirm_kill {
                 app.confirm_kill = false;
@@ -257,6 +276,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         false
                     };
                     if killed {
+                        // Give the process a moment to die, then refresh
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        app.refresh();
+                        last_refresh = std::time::Instant::now();
                         app.status_msg = Some("Killed.".into());
                     }
                 } else {

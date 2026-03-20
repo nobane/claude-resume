@@ -454,4 +454,92 @@ impl App {
             self.folder_preview_expand = 0;
         }
     }
+
+    /// Reload sessions from disk, preserving current view and selection state.
+    pub fn refresh(&mut self) {
+        // Remember what's selected so we can restore position
+        let selected_session_id = match self.view {
+            View::FolderSessions | View::AllSessions => {
+                self.selected_session().map(|s| s.id.clone())
+            }
+            _ => None,
+        };
+        let selected_folder_path = match self.view {
+            View::Folders | View::FolderSessions => {
+                self.folder_state.selected()
+                    .and_then(|i| self.folder_filtered.get(i))
+                    .map(|&idx| self.projects[idx].path.clone())
+            }
+            _ => None,
+        };
+
+        // Reload
+        let mut sessions = crate::session::load_sessions();
+        sessions.sort_by(|a, b| {
+            let a_active = a.active.is_some();
+            let b_active = b.active.is_some();
+            b_active.cmp(&a_active).then(b.last_ts.cmp(&a.last_ts))
+        });
+
+        // Rebuild projects
+        let mut proj_map: HashMap<String, (usize, u64)> = HashMap::new();
+        for s in &sessions {
+            let entry = proj_map.entry(s.project.clone()).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 = entry.1.max(s.last_ts);
+        }
+        let mut projects: Vec<Project> = proj_map
+            .into_iter()
+            .map(|(path, (count, ts))| Project {
+                path,
+                session_count: count,
+                last_ts: ts,
+            })
+            .collect();
+        projects.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+
+        self.sessions = sessions;
+        self.projects = projects;
+
+        // Rebuild folder filter
+        self.folder_filtered = (0..self.projects.len()).collect();
+
+        // Restore folder selection
+        if let Some(ref path) = selected_folder_path {
+            let pos = self.folder_filtered.iter().position(|&idx| self.projects[idx].path == *path);
+            self.folder_state.select(pos.or(Some(0)));
+        } else if self.folder_state.selected().map_or(false, |i| i >= self.folder_filtered.len()) {
+            self.folder_state.select(if self.folder_filtered.is_empty() { None } else { Some(0) });
+        }
+
+        // Rebuild session filter based on current view
+        match self.view {
+            View::FolderSessions => {
+                if let Some(ref proj) = self.selected_project {
+                    self.session_filtered = self.sessions.iter().enumerate()
+                        .filter(|(_, s)| s.project == *proj)
+                        .map(|(i, _)| i)
+                        .collect();
+                }
+            }
+            View::AllSessions => {
+                self.session_filtered = (0..self.sessions.len()).collect();
+            }
+            _ => {}
+        }
+        self.apply_filter();
+
+        // Restore session selection
+        if let Some(ref sid) = selected_session_id {
+            let pos = self.session_filtered.iter().position(|&idx| self.sessions[idx].id == *sid);
+            self.session_state.select(pos.or(Some(0)));
+        } else if self.session_state.selected().map_or(false, |i| i >= self.session_filtered.len()) {
+            self.session_state.select(if self.session_filtered.is_empty() { None } else { Some(0) });
+        }
+
+        // Reset expand state since the data changed
+        self.expand_lines = 0;
+        self.folder_preview_sel = None;
+        self.folder_preview_expand = 0;
+    }
 }
