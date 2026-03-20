@@ -338,8 +338,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Down => app.move_selection(1),
-                KeyCode::Up => app.move_selection(-1),
+                KeyCode::Down => {
+                    if app.view == View::Folders && app.folder_preview_sel.is_some() {
+                        // Navigate within expanded folder preview
+                        let sel = app.folder_preview_sel.unwrap();
+                        if let Some(folder_sel) = app.folder_state.selected() {
+                            if let Some(&proj_idx) = app.folder_filtered.get(folder_sel) {
+                                let count = app.sessions.iter()
+                                    .filter(|s| s.project == app.projects[proj_idx].path)
+                                    .count();
+                                if sel + 1 < count {
+                                    app.folder_preview_sel = Some(sel + 1);
+                                    if app.expand_lines < sel + 2 {
+                                        app.expand_lines = sel + 2;
+                                    }
+                                    app.folder_preview_expand = 0;
+                                }
+                                // At bottom of previews — stay put
+                            }
+                        }
+                    } else {
+                        app.move_selection(1);
+                    }
+                }
+                KeyCode::Up => {
+                    if app.view == View::Folders && app.folder_preview_sel.is_some() {
+                        let sel = app.folder_preview_sel.unwrap();
+                        if sel > 0 {
+                            // Move up within preview
+                            app.folder_preview_sel = Some(sel - 1);
+                            app.folder_preview_expand = 0;
+                        } else {
+                            // At top of preview — collapse back to folder nav
+                            app.folder_preview_sel = None;
+                            app.expand_lines = 0;
+                            app.folder_preview_expand = 0;
+                        }
+                    } else {
+                        app.move_selection(-1);
+                    }
+                }
                 KeyCode::Right => {
                     if app.view == View::RemoteSessions {
                         if let Some(idx) = app.remote_session_state.selected() {
