@@ -219,9 +219,10 @@ impl App {
                         if q.is_empty() {
                             return true;
                         }
-                        s.first_msg.to_lowercase().contains(&q)
+                        s.project.to_lowercase().contains(&q)
+                            || s.first_msg.to_lowercase().contains(&q)
                             || s.last_msg.to_lowercase().contains(&q)
-                            || s.project.to_lowercase().contains(&q)
+                            || s.messages.iter().any(|m| m.text.to_lowercase().contains(&q))
                     })
                     .map(|(i, _)| i)
                     .collect();
