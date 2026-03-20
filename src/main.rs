@@ -190,18 +190,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let sessions = session::load_sessions();
-    if sessions.is_empty() {
-        eprintln!("No Claude sessions found in ~/.claude/history.jsonl");
-        return Ok(());
-    }
-
-    let mut app = app::App::new(sessions);
+    // Show TUI immediately, load sessions in background
+    let mut app = app::App::empty();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
+
+    // Spawn background session load
+    let (load_tx, load_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let sessions = session::load_sessions();
+        let _ = load_tx.send(sessions);
+    });
 
     let mut last_refresh = std::time::Instant::now();
     let refresh_interval = std::time::Duration::from_secs(5);
@@ -209,13 +211,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         terminal.draw(|f| ui::draw(f, &app))?;
 
-        // Poll with timeout for periodic refresh
-        if !event::poll(std::time::Duration::from_secs(1))? {
-            // No input — check if it's time to refresh
-            if last_refresh.elapsed() >= refresh_interval {
+        // Check if background load completed
+        if app.loading {
+            if let Ok(sessions) = load_rx.try_recv() {
+                if sessions.is_empty() {
+                    restore_terminal();
+                    eprintln!("No Claude sessions found in ~/.claude/history.jsonl");
+                    return Ok(());
+                }
+                app.populate(sessions);
+                last_refresh = std::time::Instant::now();
+            }
+        }
+
+        // Poll with timeout for periodic refresh and status expiry
+        if !event::poll(std::time::Duration::from_millis(100))? {
+            if !app.loading && last_refresh.elapsed() >= refresh_interval {
                 app.refresh();
                 last_refresh = std::time::Instant::now();
             }
+            app.clear_expired_status();
             continue;
         }
 
@@ -257,8 +272,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .status();
                             }
                         }
-                        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-                        true
+                        let kill_result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+                        kill_result == 0
                     } else if app.view == View::RemoteSessions {
                         if let Some(session) = app.selected_remote_session() {
                             if let Some(pid) = session.active_pid {
@@ -280,10 +295,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::thread::sleep(std::time::Duration::from_millis(300));
                         app.refresh();
                         last_refresh = std::time::Instant::now();
-                        app.status_msg = Some("Killed.".into());
+                        app.set_status("Killed.");
+                    } else {
+                        app.set_status("Failed to kill process.");
                     }
                 } else {
                     app.status_msg = None;
+                    app.status_msg_time = None;
                 }
                 continue;
             }
@@ -538,7 +556,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.confirm_kill = true;
                         app.status_msg = Some("Kill this session? (y/n)".into());
                     } else {
-                        app.status_msg = Some("No active session to kill".into());
+                        app.set_status("No active session to kill");
                     }
                 }
                 KeyCode::Char('t') => {

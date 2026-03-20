@@ -47,16 +47,72 @@ pub struct App {
     pub recent_dirs: Vec<String>,
     pub prev_view: Option<Box<View>>,
     pub status_msg: Option<String>,
+    pub status_msg_time: Option<std::time::Instant>,
     pub tmux_mode: bool,
     pub confirm_kill: bool,
     /// Which previewed session is selected in folder view (0 = most recent)
     pub folder_preview_sel: Option<usize>,
     /// How many extra conversation lines to show for the selected folder preview session
     pub folder_preview_expand: usize,
+    /// Whether initial session load is still in progress
+    pub loading: bool,
 }
 
 impl App {
-    pub fn new(mut sessions: Vec<Session>) -> Self {
+    /// Create an empty app that shows a loading state.
+    pub fn empty() -> Self {
+        let remote_hosts = config::load_hosts();
+        let mut remote_host_state = ListState::default();
+        if !remote_hosts.is_empty() {
+            remote_host_state.select(Some(0));
+        }
+        let recent_dirs = config::load_recent_dirs();
+        App {
+            sessions: vec![],
+            projects: vec![],
+            view: View::AllSessions,
+            folder_state: ListState::default(),
+            folder_filtered: vec![],
+            session_state: ListState::default(),
+            session_filtered: vec![],
+            selected_project: None,
+            filter: String::new(),
+            filtering: false,
+            expand_lines: 0,
+            remote_hosts,
+            remote_host_state,
+            remote_sessions: Vec::new(),
+            remote_session_state: ListState::default(),
+            remote_selected_host: None,
+            remote_selected_host_name: None,
+            remote_selected_port: None,
+            remote_gpu: false,
+            remote_error: None,
+            remote_loading: false,
+            dir_list: Vec::new(),
+            dir_filtered: Vec::new(),
+            dir_state: ListState::default(),
+            dir_query: String::new(),
+            recent_dirs,
+            prev_view: None,
+            status_msg: Some("Loading sessions...".into()),
+            status_msg_time: None,
+            tmux_mode: false,
+            confirm_kill: false,
+            folder_preview_sel: None,
+            folder_preview_expand: 0,
+            loading: true,
+        }
+    }
+
+    /// Populate app with loaded sessions (called after background load completes).
+    pub fn populate(&mut self, sessions: Vec<Session>) {
+        self.loading = false;
+        self.status_msg = None;
+        self.status_msg_time = None;
+
+        // Re-use the same logic as new()
+        let mut sessions = sessions;
         sessions.sort_by(|a, b| {
             let a_active = a.active.is_some();
             let b_active = b.active.is_some();
@@ -79,60 +135,18 @@ impl App {
             .collect();
         projects.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
 
-        let folder_filtered: Vec<usize> = (0..projects.len()).collect();
-        let mut folder_state = ListState::default();
-        if !folder_filtered.is_empty() {
-            folder_state.select(Some(0));
+        self.folder_filtered = (0..projects.len()).collect();
+        if !self.folder_filtered.is_empty() {
+            self.folder_state.select(Some(0));
         }
 
-        let session_filtered: Vec<usize> = (0..sessions.len()).collect();
-        let mut session_state = ListState::default();
-        if !session_filtered.is_empty() {
-            session_state.select(Some(0));
+        self.session_filtered = (0..sessions.len()).collect();
+        if !self.session_filtered.is_empty() {
+            self.session_state.select(Some(0));
         }
 
-        let remote_hosts = config::load_hosts();
-        let mut remote_host_state = ListState::default();
-        if !remote_hosts.is_empty() {
-            remote_host_state.select(Some(0));
-        }
-
-        let recent_dirs = config::load_recent_dirs();
-
-        App {
-            sessions,
-            projects,
-            view: View::AllSessions,
-            folder_state,
-            folder_filtered,
-            session_state,
-            session_filtered,
-            selected_project: None,
-            filter: String::new(),
-            filtering: false,
-            expand_lines: 0,
-            remote_hosts,
-            remote_host_state,
-            remote_sessions: Vec::new(),
-            remote_session_state: ListState::default(),
-            remote_selected_host: None,
-            remote_selected_host_name: None,
-            remote_selected_port: None,
-            remote_gpu: false,
-            remote_error: None,
-            remote_loading: false,
-            dir_list: Vec::new(),
-            dir_filtered: Vec::new(),
-            dir_state: ListState::default(),
-            dir_query: String::new(),
-            recent_dirs,
-            prev_view: None,
-            status_msg: None,
-            tmux_mode: false,
-            confirm_kill: false,
-            folder_preview_sel: None,
-            folder_preview_expand: 0,
-        }
+        self.sessions = sessions;
+        self.projects = projects;
     }
 
     pub fn enter_folder(&mut self) {
@@ -417,6 +431,22 @@ impl App {
             .collect();
         folder_sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
         folder_sessions.get(sel).copied()
+    }
+
+    /// Set a status message that auto-expires after the given duration.
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_msg = Some(msg.into());
+        self.status_msg_time = Some(std::time::Instant::now());
+    }
+
+    /// Clear status message if it has expired (10 seconds).
+    pub fn clear_expired_status(&mut self) {
+        if let Some(t) = self.status_msg_time {
+            if t.elapsed() >= std::time::Duration::from_secs(10) {
+                self.status_msg = None;
+                self.status_msg_time = None;
+            }
+        }
     }
 
     pub fn toggle_tmux_mode(&mut self) {
