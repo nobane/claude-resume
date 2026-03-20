@@ -135,8 +135,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             View::FolderSessions | View::AllSessions => {
                 if let Some(session) = app.selected_session() {
                     match &session.active {
-                        Some(info) if info.in_tmux && info.window_address.is_some() => " focus  ",
-                        Some(info) if info.in_tmux => " steal  ",
+                        Some(info) if info.in_tmux => " attach  ",
                         Some(_) => " focus  ",
                         None => " resume  ",
                     }
@@ -146,9 +145,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             }
             _ => " resume/focus  ",
         };
-        let enter_color = if enter_label == " steal  " { Color::Yellow } else { Color::Green };
         let mut hints = vec![
-            Span::styled(" enter", Style::default().fg(enter_color)),
+            Span::styled(" enter", Style::default().fg(Color::Green)),
             Span::raw(enter_label),
         ];
         if app.view == View::FolderSessions || app.view == View::RemoteSessions {
@@ -172,17 +170,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         hints.push(Span::raw("ew  "));
         hints.push(Span::styled("t", Style::default().fg(Color::Green)));
         hints.push(Span::raw("mux  "));
-        // Show steal hint when selected session is an active tmux session
-        if matches!(app.view, View::FolderSessions | View::AllSessions) {
-            if let Some(session) = app.selected_session() {
-                if session.active.as_ref().map_or(false, |a| a.in_tmux) {
-                    hints.push(Span::styled("s", Style::default().fg(Color::Yellow)));
-                    hints.push(Span::raw("teal  "));
-                }
-            }
-        }
         // Show kill hint when selected session is active
         let show_kill = match app.view {
+            View::Folders => {
+                app.selected_folder_preview_session().map_or(false, |s| s.active.is_some())
+            }
             View::FolderSessions | View::AllSessions => {
                 app.selected_session().map_or(false, |s| s.active.is_some())
             }
@@ -192,7 +184,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             _ => false,
         };
         if show_kill {
-            hints.push(Span::styled("K", Style::default().fg(Color::Red)));
+            hints.push(Span::styled("k", Style::default().fg(Color::Red)));
             hints.push(Span::raw("ill  "));
         }
         if !matches!(app.view, View::RemoteHosts | View::RemoteSessions) {

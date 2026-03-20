@@ -211,40 +211,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if app.confirm_kill {
                 app.confirm_kill = false;
                 if key.code == KeyCode::Char('y') {
-                    let killed = match app.view {
+                    // Get the session to kill based on current view
+                    let local_kill_info: Option<(u32, bool, Option<String>)> = match app.view {
+                        View::Folders => {
+                            app.selected_folder_preview_session().and_then(|s| {
+                                s.active.as_ref().map(|info| {
+                                    (info.pid, info.in_tmux, info.tmux_session.clone())
+                                })
+                            })
+                        }
                         View::FolderSessions | View::AllSessions => {
-                            if let Some(session) = app.selected_session() {
-                                if let Some(ref info) = session.active {
-                                    let in_tmux = info.in_tmux;
-                                    let tmux_sess = info.tmux_session.clone();
-                                    let pid = info.pid;
-                                    if in_tmux {
-                                        if let Some(ts) = tmux_sess {
-                                            let _ = Command::new("tmux")
-                                                .args(["kill-session", "-t", &ts])
-                                                .status();
-                                        }
-                                    }
-                                    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-                                    true
-                                } else { false }
-                            } else { false }
+                            app.selected_session().and_then(|s| {
+                                s.active.as_ref().map(|info| {
+                                    (info.pid, info.in_tmux, info.tmux_session.clone())
+                                })
+                            })
                         }
-                        View::RemoteSessions => {
-                            if let Some(session) = app.selected_remote_session() {
-                                if let Some(pid) = session.active_pid {
-                                    let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
-                                    let session_id = session.id.clone();
-                                    let in_tmux = session.in_tmux;
-                                    if in_tmux {
-                                        let _ = remote::kill_remote_tmux(&ssh_host, app.remote_selected_port, &session_id);
-                                    }
-                                    let _ = remote::kill_remote_pid(&ssh_host, app.remote_selected_port, pid);
-                                    true
-                                } else { false }
-                            } else { false }
+                        _ => None,
+                    };
+
+                    let killed = if let Some((pid, in_tmux, tmux_sess)) = local_kill_info {
+                        if in_tmux {
+                            if let Some(ts) = tmux_sess {
+                                let _ = Command::new("tmux")
+                                    .args(["kill-session", "-t", &ts])
+                                    .status();
+                            }
                         }
-                        _ => false,
+                        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                        true
+                    } else if app.view == View::RemoteSessions {
+                        if let Some(session) = app.selected_remote_session() {
+                            if let Some(pid) = session.active_pid {
+                                let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
+                                let session_id = session.id.clone();
+                                let in_tmux = session.in_tmux;
+                                if in_tmux {
+                                    let _ = remote::kill_remote_tmux(&ssh_host, app.remote_selected_port, &session_id);
+                                }
+                                let _ = remote::kill_remote_pid(&ssh_host, app.remote_selected_port, pid);
+                                true
+                            } else { false }
+                        } else { false }
+                    } else {
+                        false
                     };
                     if killed {
                         app.status_msg = Some("Killed.".into());
@@ -486,9 +496,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.enter_new_session();
                     }
                 }
-                KeyCode::Char('K') => {
+                KeyCode::Char('k') => {
                     // Kill: ask for confirmation before killing selected session
                     let has_active = match app.view {
+                        View::Folders => {
+                            app.selected_folder_preview_session()
+                                .map_or(false, |s| s.active.is_some())
+                        }
                         View::FolderSessions | View::AllSessions => {
                             app.selected_session().map_or(false, |s| s.active.is_some())
                         }
@@ -500,28 +514,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if has_active {
                         app.confirm_kill = true;
                         app.status_msg = Some("Kill this session? (y/n)".into());
+                    } else {
+                        app.status_msg = Some("No active session to kill".into());
                     }
                 }
                 KeyCode::Char('t') => {
                     app.toggle_tmux_mode();
-                }
-                KeyCode::Char('s') => {
-                    // Steal: detach other clients and attach a local tmux session here
-                    if matches!(app.view, View::FolderSessions | View::AllSessions) {
-                        if let Some(session) = app.selected_session() {
-                            let is_tmux = session.active.as_ref().map_or(false, |a| a.in_tmux);
-                            if is_tmux {
-                                let sid = session.id.clone();
-                                let tmux_sess = session.active.as_ref()
-                                    .and_then(|a| a.tmux_session.clone())
-                                    .unwrap_or_else(|| session::tmux_session_name(&sid));
-                                app.status_msg = Some("Stealing tmux session...".into());
-                                terminal.draw(|f| ui::draw(f, &app))?;
-                                restore_terminal();
-                                tmux_attach_detach(&tmux_sess);
-                            }
-                        }
-                    }
                 }
                 KeyCode::Char('a') => {
                     // Quick jump to All Sessions view
@@ -685,20 +683,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if app.tmux_mode {
                                 tmux_resume_local(&sid, &cwd);
                             } else {
-                                let status = Command::new("claude")
+                                let err = Command::new("claude")
                                     .arg("--dangerously-skip-permissions")
                                     .arg("--resume")
                                     .arg(&sid)
                                     .current_dir(&cwd)
-                                    .status();
-
-                                match status {
-                                    Ok(s) => std::process::exit(s.code().unwrap_or(0)),
-                                    Err(e) => {
-                                        eprintln!("Failed to launch claude: {}", e);
-                                        std::process::exit(1);
-                                    }
-                                }
+                                    .exec();
+                                eprintln!("Failed to launch claude: {}", err);
+                                std::process::exit(1);
                             }
                         }
                     }
