@@ -303,12 +303,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     KeyCode::Up => app.move_selection(-1),
                     KeyCode::Down => app.move_selection(1),
-                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.move_selection(-1);
-                    }
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.move_selection(1);
-                    }
                     KeyCode::Char(c) => {
                         app.dir_query.push(c);
                         app.apply_dir_filter();
@@ -344,9 +338,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Char('j') | KeyCode::Down => app.move_selection(1),
-                KeyCode::Char('k') | KeyCode::Up => app.move_selection(-1),
-                KeyCode::Char('l') | KeyCode::Right => {
+                KeyCode::Down => app.move_selection(1),
+                KeyCode::Up => app.move_selection(-1),
+                KeyCode::Right => {
                     if app.view == View::RemoteSessions {
                         if let Some(idx) = app.remote_session_state.selected() {
                             // Lazy-load messages on first expand
@@ -389,7 +383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                KeyCode::Char('h') | KeyCode::Left => {
+                KeyCode::Left => {
                     if app.view == View::Folders && app.expand_lines > 0 {
                         if let Some(sel) = app.folder_preview_sel {
                             if sel > 0 {

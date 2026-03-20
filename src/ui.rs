@@ -159,7 +159,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             app.view,
             View::Folders | View::FolderSessions | View::AllSessions | View::RemoteSessions
         ) {
-            hints.push(Span::styled("l/h", Style::default().fg(Color::Green)));
+            hints.push(Span::styled("←/→", Style::default().fg(Color::Green)));
             hints.push(Span::raw(if app.view == View::Folders { " preview  " } else { " expand  " }));
         }
         hints.push(Span::styled("a", Style::default().fg(Color::Green)));
