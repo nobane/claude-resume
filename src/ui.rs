@@ -434,8 +434,8 @@ fn draw_session_list<'a>(
             let is_selected = selected_idx == Some(list_pos);
             if is_selected && expand_lines > 0 {
                 let mut lines = vec![line1];
-                lines.extend(preview_lines);
 
+                // Show expanded messages in chronological order, then the preview at the bottom
                 let msg_count = s.messages.len();
                 let skip = default_preview_count.max(1);
                 let available = msg_count.saturating_sub(skip);
@@ -443,7 +443,7 @@ fn draw_session_list<'a>(
                 let start = msg_count.saturating_sub(skip + show);
                 let end = msg_count.saturating_sub(skip);
 
-                for i in (start..end).rev() {
+                for i in start..end {
                     let turn = &s.messages[i];
                     let is_assistant = turn.role == "assistant";
                     let role_label = if is_assistant { "  claude " } else { "  you    " };
@@ -483,6 +483,8 @@ fn draw_session_list<'a>(
                     }
                 }
 
+                // Preview (latest messages) at the bottom
+                lines.extend(preview_lines);
                 lines.push(Line::raw(""));
                 ListItem::new(lines)
             } else {
