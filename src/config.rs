@@ -8,6 +8,27 @@ pub struct HostConfig {
     pub gpu: bool,
     #[serde(default)]
     pub port: Option<u16>,
+    /// Custom path to claude-resume binary on remote host (default: ~/.local/bin/claude-resume)
+    #[serde(default)]
+    pub claude_resume_bin: Option<String>,
+    /// Custom path to tmux binary on remote host (default: tmux)
+    #[serde(default)]
+    pub tmux_bin: Option<String>,
+    /// Custom path to claude binary on remote host (default: claude)
+    #[serde(default)]
+    pub claude_bin: Option<String>,
+}
+
+impl HostConfig {
+    pub fn remote_resume_bin(&self) -> &str {
+        self.claude_resume_bin.as_deref().unwrap_or("~/.local/bin/claude-resume")
+    }
+    pub fn remote_tmux_bin(&self) -> &str {
+        self.tmux_bin.as_deref().unwrap_or("tmux")
+    }
+    pub fn remote_claude_bin(&self) -> &str {
+        self.claude_bin.as_deref().unwrap_or("claude")
+    }
 }
 
 #[derive(Deserialize)]
@@ -132,5 +153,75 @@ gpu = true
     fn test_parse_hosts_toml_invalid() {
         let hosts = parse_hosts_toml("not valid toml {{{{");
         assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hosts_toml_custom_bins() {
+        let toml = r#"
+[[host]]
+name = "custom"
+ssh = "user@host"
+claude_resume_bin = "/opt/bin/claude-resume"
+tmux_bin = "/usr/local/bin/tmux"
+claude_bin = "/usr/local/bin/claude"
+"#;
+        let hosts = parse_hosts_toml(toml);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].remote_resume_bin(), "/opt/bin/claude-resume");
+        assert_eq!(hosts[0].remote_tmux_bin(), "/usr/local/bin/tmux");
+        assert_eq!(hosts[0].remote_claude_bin(), "/usr/local/bin/claude");
+    }
+
+    #[test]
+    fn test_host_config_default_bins() {
+        let toml = r#"
+[[host]]
+name = "default"
+ssh = "user@host"
+"#;
+        let hosts = parse_hosts_toml(toml);
+        assert_eq!(hosts[0].remote_resume_bin(), "~/.local/bin/claude-resume");
+        assert_eq!(hosts[0].remote_tmux_bin(), "tmux");
+        assert_eq!(hosts[0].remote_claude_bin(), "claude");
+    }
+
+    #[test]
+    fn test_recent_dirs_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recent-dirs.json");
+
+        // Write directly to test path
+        let dirs = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let json = serde_json::to_string(&dirs).unwrap();
+        std::fs::write(&path, &json).unwrap();
+
+        // Read back
+        let content = std::fs::read_to_string(&path).unwrap();
+        let loaded: Vec<String> = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded, dirs);
+    }
+
+    #[test]
+    fn test_recent_dirs_corrupted_json() {
+        // Should return empty vec, not panic
+        let result: Vec<String> = serde_json::from_str("not json").unwrap_or_default();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hosts_toml_partial_fields() {
+        // Only required fields
+        let toml = r#"
+[[host]]
+name = "minimal"
+ssh = "user@host"
+"#;
+        let hosts = parse_hosts_toml(toml);
+        assert_eq!(hosts.len(), 1);
+        assert!(!hosts[0].gpu);
+        assert_eq!(hosts[0].port, None);
+        assert_eq!(hosts[0].claude_resume_bin, None);
+        assert_eq!(hosts[0].tmux_bin, None);
+        assert_eq!(hosts[0].claude_bin, None);
     }
 }

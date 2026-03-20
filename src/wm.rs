@@ -198,3 +198,103 @@ fn collect_i3_windows(node: &I3Node, workspace: Option<&str>, windows: &mut Vec<
         collect_i3_windows(child, ws, windows);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_returns_without_panic() {
+        // Should never panic regardless of environment
+        let wm = detect();
+        // Just verify it returns a valid enum variant
+        let _ = match wm {
+            Wm::Hyprland => "hyprland",
+            Wm::I3 => "i3",
+            Wm::Unknown => "unknown",
+        };
+    }
+
+    #[test]
+    fn test_list_windows_unknown() {
+        let windows = list_windows(Wm::Unknown);
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn test_focus_window_unknown_noop() {
+        // Should not panic
+        focus_window(Wm::Unknown, "some-id");
+    }
+
+    #[test]
+    fn test_collect_i3_windows_empty_tree() {
+        let root = I3Node {
+            id: 0,
+            name: Some("root".into()),
+            node_type: Some("root".into()),
+            window: None,
+            nodes: vec![],
+            floating_nodes: vec![],
+        };
+        let mut windows = Vec::new();
+        collect_i3_windows(&root, None, &mut windows);
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn test_collect_i3_windows_with_workspace() {
+        let root = I3Node {
+            id: 1,
+            name: Some("root".into()),
+            node_type: Some("root".into()),
+            window: None,
+            nodes: vec![I3Node {
+                id: 2,
+                name: Some("1".into()),
+                node_type: Some("workspace".into()),
+                window: None,
+                nodes: vec![I3Node {
+                    id: 3,
+                    name: Some("terminal".into()),
+                    node_type: Some("con".into()),
+                    window: Some(12345),
+                    nodes: vec![],
+                    floating_nodes: vec![],
+                }],
+                floating_nodes: vec![],
+            }],
+            floating_nodes: vec![],
+        };
+        let mut windows = Vec::new();
+        collect_i3_windows(&root, None, &mut windows);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].workspace, "1");
+        assert_eq!(windows[0].x11_window, 12345);
+        assert_eq!(windows[0].con_id, 3);
+        assert_eq!(windows[0].title, "terminal");
+    }
+
+    #[test]
+    fn test_parse_hyprland_clients() {
+        let json = r#"[
+            {"pid": 1234, "workspace": {"name": "1"}, "address": "0x1234"},
+            {"pid": -1, "workspace": {"name": "2"}, "address": "0x5678"},
+            {"pid": 5678, "workspace": {"name": "3"}, "address": "0xabcd"}
+        ]"#;
+        let clients: Vec<HyprClient> = serde_json::from_str(json).unwrap();
+        let windows: Vec<WmWindow> = clients
+            .into_iter()
+            .filter(|c| c.pid > 0)
+            .map(|c| WmWindow {
+                pid: c.pid as u32,
+                workspace: c.workspace.name,
+                id: c.address,
+                title: None,
+            })
+            .collect();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].pid, 1234);
+        assert_eq!(windows[1].pid, 5678);
+    }
+}

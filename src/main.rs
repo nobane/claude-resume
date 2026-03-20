@@ -278,10 +278,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(session) = app.selected_remote_session() {
                             if let Some(pid) = session.active_pid {
                                 let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
+                                let tmux_bin = app.remote_selected_config.as_ref()
+                                    .map(|c| c.remote_tmux_bin().to_string())
+                                    .unwrap_or_else(|| "tmux".to_string());
                                 let session_id = session.id.clone();
                                 let in_tmux = session.in_tmux;
                                 if in_tmux {
-                                    let _ = remote::kill_remote_tmux(&ssh_host, app.remote_selected_port, &session_id);
+                                    let _ = remote::kill_remote_tmux(&ssh_host, app.remote_selected_port, &session_id, &tmux_bin);
                                 }
                                 let _ = remote::kill_remote_pid(&ssh_host, app.remote_selected_port, pid);
                                 true
@@ -325,13 +328,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             config::add_recent_dir(&dir.path);
 
                             if app.view == View::NewRemoteSession {
-                                let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
-                                let host_name = app.remote_selected_host_name.clone().unwrap_or_default();
-                                app.status_msg = Some(format!("Connecting to {}...", host_name));
-                                terminal.draw(|f| ui::draw(f, &app))?;
-                                restore_terminal();
-                                let status = remote::open_new_remote_session(&ssh_host, app.remote_selected_port, &dir.path);
-                                std::process::exit(status.code().unwrap_or(0));
+                                if let Some(ref host_cfg) = app.remote_selected_config {
+                                    let host_name = app.remote_selected_host_name.clone().unwrap_or_default();
+                                    app.status_msg = Some(format!("Connecting to {}...", host_name));
+                                    terminal.draw(|f| ui::draw(f, &app))?;
+                                    restore_terminal();
+                                    let status = remote::open_new_remote_session(host_cfg, &dir.path);
+                                    std::process::exit(status.code().unwrap_or(0));
+                                }
                             } else if app.tmux_mode {
                                 // Local tmux: wrap in tmux session
                                 app.status_msg = Some("Starting tmux session...".into());
@@ -438,12 +442,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(idx) = app.remote_session_state.selected() {
                             // Lazy-load messages on first expand
                             if app.remote_sessions[idx].messages.is_empty() {
-                                let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
-                                let session_id = app.remote_sessions[idx].id.clone();
-                                app.status_msg = Some("Loading messages...".into());
-                                terminal.draw(|f| ui::draw(f, &app))?;
-                                if let Ok(turns) = remote::fetch_remote_messages(&ssh_host, app.remote_selected_port, &session_id) {
-                                    app.remote_sessions[idx].messages = turns;
+                                if let Some(ref host_cfg) = app.remote_selected_config {
+                                    let session_id = app.remote_sessions[idx].id.clone();
+                                    app.status_msg = Some("Loading messages...".into());
+                                    terminal.draw(|f| ui::draw(f, &app))?;
+                                    if let Ok(turns) = remote::fetch_remote_messages(host_cfg, &session_id) {
+                                        app.remote_sessions[idx].messages = turns;
+                                    }
                                 }
                                 app.status_msg = None;
                             }
@@ -658,34 +663,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     View::RemoteSessions => {
                         if let Some(session) = app.selected_remote_session() {
-                            let ssh_host = app.remote_selected_host.clone().unwrap_or_default();
-                            let host_name = app.remote_selected_host_name.clone().unwrap_or_default();
-                            let active_pid = session.active_pid;
-                            let session_id = session.id.clone();
-                            let project = session.project.clone();
-                            let _ = session;
+                            if let Some(ref host_cfg) = app.remote_selected_config.clone() {
+                                let ssh_host = &host_cfg.ssh;
+                                let host_name = app.remote_selected_host_name.clone().unwrap_or_default();
+                                let tmux_bin = host_cfg.remote_tmux_bin().to_string();
+                                let active_pid = session.active_pid;
+                                let session_id = session.id.clone();
+                                let project = session.project.clone();
+                                let _ = session;
 
-                            if let Some(pid) = active_pid {
-                                // Check if it's running inside a tmux session — if so,
-                                // just attach instead of killing. Only kill if not in tmux.
-                                let in_tmux = remote::is_in_tmux_session(&ssh_host, app.remote_selected_port, &session_id);
-                                if !in_tmux {
-                                    app.status_msg = Some(format!("Killing PID {} on {}...", pid, host_name));
-                                    terminal.draw(|f| ui::draw(f, &app))?;
+                                if let Some(pid) = active_pid {
+                                    let in_tmux = remote::is_in_tmux_session(ssh_host, host_cfg.port, &session_id, &tmux_bin);
+                                    if !in_tmux {
+                                        app.status_msg = Some(format!("Killing PID {} on {}...", pid, host_name));
+                                        terminal.draw(|f| ui::draw(f, &app))?;
 
-                                    if remote::is_remote_pid_alive(&ssh_host, app.remote_selected_port, pid) {
-                                        let _ = remote::kill_remote_pid(&ssh_host, app.remote_selected_port, pid);
-                                        std::thread::sleep(std::time::Duration::from_millis(500));
+                                        if remote::is_remote_pid_alive(ssh_host, host_cfg.port, pid) {
+                                            let _ = remote::kill_remote_pid(ssh_host, host_cfg.port, pid);
+                                            std::thread::sleep(std::time::Duration::from_millis(500));
+                                        }
                                     }
                                 }
+
+                                app.status_msg = Some(format!("Connecting to {}...", host_name));
+                                terminal.draw(|f| ui::draw(f, &app))?;
+
+                                restore_terminal();
+                                let status = remote::open_remote_session_by_id(host_cfg, &session_id, &project);
+                                std::process::exit(status.code().unwrap_or(0));
                             }
-
-                            app.status_msg = Some(format!("Connecting to {}...", host_name));
-                            terminal.draw(|f| ui::draw(f, &app))?;
-
-                            restore_terminal();
-                            let status = remote::open_remote_session_by_id(&ssh_host, app.remote_selected_port, &session_id, &project);
-                            std::process::exit(status.code().unwrap_or(0));
                         }
                     }
                     View::FolderSessions | View::AllSessions => {

@@ -5,7 +5,7 @@ use crate::config;
 use crate::remote;
 use crate::session::{DirEntry, Project, Session};
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum View {
     Folders,
     FolderSessions,
@@ -37,6 +37,7 @@ pub struct App {
     pub remote_selected_host_name: Option<String>,
     pub remote_selected_port: Option<u16>,
     pub remote_gpu: bool,
+    pub remote_selected_config: Option<config::HostConfig>,
     pub remote_error: Option<String>,
     pub remote_loading: bool,
     // New session directory picker
@@ -87,6 +88,7 @@ impl App {
             remote_selected_host_name: None,
             remote_selected_port: None,
             remote_gpu: false,
+            remote_selected_config: None,
             remote_error: None,
             remote_loading: false,
             dir_list: Vec::new(),
@@ -299,11 +301,11 @@ impl App {
 
     pub fn enter_new_remote_session(&mut self) {
         // For remote, we need to fetch dirs from the remote host
-        let ssh_host = match &self.remote_selected_host {
+        let host = match &self.remote_selected_config {
             Some(h) => h.clone(),
             None => return,
         };
-        match remote::fetch_remote_dirs(&ssh_host, self.remote_selected_port) {
+        match remote::fetch_remote_dirs(&host) {
             Ok(dirs) => {
                 self.dir_list = dirs;
                 // Re-score with local recent_dirs knowledge
@@ -385,6 +387,7 @@ impl App {
         self.remote_selected_host_name = Some(host.name.clone());
         self.remote_selected_port = host.port;
         self.remote_gpu = host.gpu;
+        self.remote_selected_config = Some(host.clone());
         self.status_msg = Some(format!("Connecting to {}...", host.name));
         Some(host)
     }
@@ -572,5 +575,229 @@ impl App {
         self.expand_lines = 0;
         self.folder_preview_sel = None;
         self.folder_preview_expand = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{Session, Turn};
+
+    fn make_session(id: &str, project: &str, ts: u64) -> Session {
+        Session {
+            id: id.to_string(),
+            project: project.to_string(),
+            last_ts: ts,
+            msg_count: 1,
+            first_msg: format!("msg from {}", id),
+            last_msg: format!("last from {}", id),
+            last_cwd: None,
+            active: None,
+            messages: vec![
+                Turn { role: "user".into(), text: format!("hello {}", id) },
+                Turn { role: "assistant".into(), text: format!("hi from {}", id) },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_empty_app() {
+        let app = App::empty();
+        assert!(app.loading);
+        assert!(app.sessions.is_empty());
+        assert!(app.projects.is_empty());
+        assert_eq!(app.status_msg.as_deref(), Some("Loading sessions..."));
+    }
+
+    #[test]
+    fn test_populate() {
+        let mut app = App::empty();
+        let sessions = vec![
+            make_session("s1", "/proj/a", 1000),
+            make_session("s2", "/proj/a", 2000),
+            make_session("s3", "/proj/b", 3000),
+        ];
+        app.populate(sessions);
+
+        assert!(!app.loading);
+        assert_eq!(app.sessions.len(), 3);
+        assert_eq!(app.projects.len(), 2);
+        assert_eq!(app.session_filtered.len(), 3);
+        assert_eq!(app.session_state.selected(), Some(0));
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn test_populate_sorts_by_timestamp() {
+        let mut app = App::empty();
+        let sessions = vec![
+            make_session("old", "/proj", 1000),
+            make_session("new", "/proj", 3000),
+            make_session("mid", "/proj", 2000),
+        ];
+        app.populate(sessions);
+
+        // Should be sorted newest first
+        assert_eq!(app.sessions[0].id, "new");
+        assert_eq!(app.sessions[1].id, "mid");
+        assert_eq!(app.sessions[2].id, "old");
+    }
+
+    #[test]
+    fn test_move_selection() {
+        let mut app = App::empty();
+        app.populate(vec![
+            make_session("s1", "/a", 1000),
+            make_session("s2", "/b", 2000),
+            make_session("s3", "/c", 3000),
+        ]);
+
+        assert_eq!(app.session_state.selected(), Some(0));
+        app.move_selection(1);
+        assert_eq!(app.session_state.selected(), Some(1));
+        app.move_selection(1);
+        assert_eq!(app.session_state.selected(), Some(2));
+        // Can't go past end
+        app.move_selection(1);
+        assert_eq!(app.session_state.selected(), Some(2));
+        // Can go back
+        app.move_selection(-1);
+        assert_eq!(app.session_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn test_jump_top_bottom() {
+        let mut app = App::empty();
+        app.populate(vec![
+            make_session("s1", "/a", 1000),
+            make_session("s2", "/b", 2000),
+            make_session("s3", "/c", 3000),
+        ]);
+
+        app.jump_bottom();
+        assert_eq!(app.session_state.selected(), Some(2));
+        app.jump_top();
+        assert_eq!(app.session_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_filter_sessions() {
+        let mut app = App::empty();
+        app.populate(vec![
+            make_session("s1", "/proj/alpha", 1000),
+            make_session("s2", "/proj/beta", 2000),
+            make_session("s3", "/proj/gamma", 3000),
+        ]);
+
+        app.filter = "beta".into();
+        app.apply_filter();
+        assert_eq!(app.session_filtered.len(), 1);
+        assert_eq!(app.sessions[app.session_filtered[0]].project, "/proj/beta");
+    }
+
+    #[test]
+    fn test_filter_searches_messages() {
+        let mut app = App::empty();
+        let mut s = make_session("s1", "/proj", 1000);
+        s.messages = vec![
+            Turn { role: "user".into(), text: "find the needle".into() },
+        ];
+        app.populate(vec![
+            s,
+            make_session("s2", "/proj", 2000),
+        ]);
+
+        app.filter = "needle".into();
+        app.apply_filter();
+        assert_eq!(app.session_filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_empty_shows_all() {
+        let mut app = App::empty();
+        app.populate(vec![
+            make_session("s1", "/a", 1000),
+            make_session("s2", "/b", 2000),
+        ]);
+
+        app.filter = "".into();
+        app.apply_filter();
+        assert_eq!(app.session_filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_enter_folder() {
+        let mut app = App::empty();
+        app.populate(vec![
+            make_session("s1", "/proj/a", 1000),
+            make_session("s2", "/proj/a", 2000),
+            make_session("s3", "/proj/b", 3000),
+        ]);
+
+        app.view = View::Folders;
+        app.folder_state.select(Some(0));
+        app.enter_folder();
+
+        assert_eq!(app.view, View::FolderSessions);
+        // Should only show sessions from the selected project
+        assert!(app.session_filtered.len() <= 2);
+    }
+
+    #[test]
+    fn test_toggle_tmux() {
+        let mut app = App::empty();
+        assert!(!app.tmux_mode);
+        app.toggle_tmux_mode();
+        assert!(app.tmux_mode);
+        app.toggle_tmux_mode();
+        assert!(!app.tmux_mode);
+    }
+
+    #[test]
+    fn test_set_status_and_expire() {
+        let mut app = App::empty();
+        app.set_status("test message");
+        assert_eq!(app.status_msg.as_deref(), Some("test message"));
+        assert!(app.status_msg_time.is_some());
+
+        // Shouldn't expire immediately
+        app.clear_expired_status();
+        assert!(app.status_msg.is_some());
+    }
+
+    #[test]
+    fn test_selected_session() {
+        let mut app = App::empty();
+        app.populate(vec![
+            make_session("s1", "/a", 3000),
+            make_session("s2", "/b", 2000),
+        ]);
+
+        let s = app.selected_session().unwrap();
+        assert_eq!(s.id, "s1"); // Newest first
+    }
+
+    #[test]
+    fn test_move_selection_empty() {
+        let mut app = App::empty();
+        // Shouldn't panic on empty list
+        app.move_selection(1);
+        app.move_selection(-1);
+        app.jump_top();
+        app.jump_bottom();
+    }
+
+    #[test]
+    fn test_back_to_folders() {
+        let mut app = App::empty();
+        app.populate(vec![make_session("s1", "/a", 1000)]);
+        app.view = View::FolderSessions;
+        app.filter = "something".into();
+        app.expand_lines = 5;
+
+        app.back_to_folders();
+        assert_eq!(app.view, View::Folders);
+        assert!(app.filter.is_empty());
+        assert_eq!(app.expand_lines, 0);
     }
 }
