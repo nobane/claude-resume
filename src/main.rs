@@ -440,14 +440,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 KeyCode::Right => {
                     if app.view == View::RemoteSessions {
                         if let Some(idx) = app.remote_session_state.selected() {
-                            // Lazy-load messages on first expand
-                            if app.remote_sessions[idx].messages.is_empty() {
+                            // Lazy-load full messages on first expand (preview only has last 2)
+                            if app.remote_sessions[idx].messages.len() <= 2 && app.expand_lines == 0 {
                                 if let Some(ref host_cfg) = app.remote_selected_config {
                                     let session_id = app.remote_sessions[idx].id.clone();
                                     app.status_msg = Some("Loading messages...".into());
                                     terminal.draw(|f| ui::draw(f, &app))?;
                                     if let Ok(turns) = remote::fetch_remote_messages(host_cfg, &session_id) {
-                                        app.remote_sessions[idx].messages = turns;
+                                        if !turns.is_empty() {
+                                            app.remote_sessions[idx].messages = turns;
+                                        }
                                     }
                                 }
                                 app.status_msg = None;
