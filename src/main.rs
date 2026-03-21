@@ -159,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --json flag: dump session data as JSON for remote consumption (lightweight — no messages)
+    // --json flag: dump session data as JSON for remote consumption (with last 2 messages for preview)
     if std::env::args().any(|a| a == "--json") {
         let sessions = session::load_sessions_lightweight();
         let json_sessions: Vec<JsonSession> = sessions
@@ -179,7 +179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     last_cwd: s.last_cwd,
                     active_pid,
                     in_tmux,
-                    messages: vec![],
+                    messages: s.messages,
                 }
             })
             .collect();

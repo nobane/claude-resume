@@ -683,9 +683,15 @@ fn load_sessions_inner(lightweight: bool) -> Vec<Session> {
         let last_ts = msgs.last().map(|(ts, _)| *ts).unwrap_or(0);
         let msg_count = msgs.len();
 
-        // In lightweight mode, skip reading full turns (expensive I/O)
+        // In lightweight mode, only read last 2 turns for preview (not full history)
         let messages = if lightweight {
-            vec![]
+            if let Some((_cwd, path)) = resumable.get(&sid) {
+                let all = read_session_turns(path);
+                let start = all.len().saturating_sub(2);
+                all[start..].to_vec()
+            } else {
+                vec![]
+            }
         } else if let Some((_cwd, path)) = resumable.get(&sid) {
             read_session_turns(path)
         } else {
