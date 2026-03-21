@@ -27,7 +27,7 @@ impl HostConfig {
         self.tmux_bin.as_deref().unwrap_or("tmux")
     }
     pub fn remote_claude_bin(&self) -> &str {
-        self.claude_bin.as_deref().unwrap_or("claude")
+        self.claude_bin.as_deref().unwrap_or("$HOME/.local/bin/claude")
     }
 }
 
@@ -182,7 +182,7 @@ ssh = "user@host"
         let hosts = parse_hosts_toml(toml);
         assert_eq!(hosts[0].remote_resume_bin(), "~/.local/bin/claude-resume");
         assert_eq!(hosts[0].remote_tmux_bin(), "tmux");
-        assert_eq!(hosts[0].remote_claude_bin(), "claude");
+        assert_eq!(hosts[0].remote_claude_bin(), "$HOME/.local/bin/claude");
     }
 
     #[test]
